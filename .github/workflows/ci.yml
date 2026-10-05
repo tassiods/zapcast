@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel previous runs on the same ref so a fresh push to a PR replaces
+# the in-flight job instead of queueing on top of it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend (vitest + tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: npm install
+        run: npm ci || npm install
+
+      - name: tsc --noEmit
+        run: npm run test:types
+
+      - name: vitest
+        run: npm test
+
+      - name: vite build
+        # Smoke-test the bundler so a broken build can't slip into a
+        # release branch; the artefact is uploaded for the release job.
+        run: npm run build
+
+      - name: upload bundle artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: internal/server/web/dist
+          retention-days: 14
+
+  build:
+    name: build / vet / test (race + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need 'gofmt -s -w':"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -exclude=G104,G404 ./...
+
+      - name: build
+        env:
+          CGO_ENABLED: "1"
+        run: go build -o /dev/null ./...
+
+      - name: test (race + coverage)
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | tee coverage.txt
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "TOTAL_COVERAGE=$total" >> "$GITHUB_ENV"
+          echo "::notice::Total coverage: ${total}%"
+
+      - name: enforce coverage threshold
+        env:
+          MIN_COVERAGE: "65"
+        run: |
+          awk -v total="$TOTAL_COVERAGE" -v min="$MIN_COVERAGE" 'BEGIN {
+            if (total + 0 < min + 0) {
+              printf "coverage %.1f%% is below minimum %s%%\n", total, min
+              exit 1
+            }
+            printf "coverage %.1f%% is above minimum %s%%\n", total, min
+          }'
+
+      - name: upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: |
+            coverage.out
+            coverage.txt
+          retention-days: 14

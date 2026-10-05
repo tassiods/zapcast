@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a defect in ZapCast
+title: "bug: <short description>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Before submitting**, please:
+        - Search [existing issues](https://github.com/tassiods/zapcast/issues)
+          to avoid duplicates.
+        - **Never include real WhatsApp session data** (`store/device.db`),
+          phone numbers of real contacts, or message bodies. Redact anything
+          sensitive.
+        - For security issues, do not file a public issue — open a
+          [security advisory](https://github.com/tassiods/zapcast/security/advisories/new)
+          instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: ZapCast version / commit
+      description: Output of `git rev-parse HEAD` or release tag
+      placeholder: "e.g. 5b38a2f"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version`
+      placeholder: "e.g. go1.25.1 linux/amd64"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system / architecture
+      placeholder: "e.g. Ubuntu 24.04, x86_64; macOS 15, arm64; Docker on Alpine"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How are you running ZapCast?
+      options:
+        - "go run ."
+        - "go build binary"
+        - "Docker / docker compose"
+        - "Other (describe in steps)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, minimal steps that reliably reproduce the issue.
+      placeholder: |
+        1. Start ZapCast with `LOG_LEVEL=debug`
+        2. POST /api/contacts with body { ... }
+        3. Observe response
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Run with `LOG_LEVEL=debug LOG_FORMAT=json` if possible. Redact phone
+        numbers, message bodies, and anything from `store/`.
+      render: shell
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I redacted any private data (numbers, message contents, session files).
+          required: true
+        - label: I agree to follow this project's Code of Conduct.
+          required: true

@@ -1,0 +1,16 @@
+store/
+zapcast
+*.db
+*.db-wal
+*.db-shm
+resources/*
+coverage.out
+coverage.txt
+
+# Frontend tooling artefacts
+node_modules/
+internal/server/web/dist/
+
+# Test runner artefacts
+test-results/
+playwright-report/

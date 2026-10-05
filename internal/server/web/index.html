@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="light" data-accent="volt" data-density="regular">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" id="metaThemeColor" content="#fafaf7">
+  <meta name="description" content="Envio em massa de mensagens WhatsApp via Multi-Device." data-i18n-content="ui_meta_description">
+
+  <!-- CSP: scripts from same-origin only. Style-src keeps 'unsafe-inline'
+       because the SPA stamps inline style on UI components. -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    base-uri 'self';
+    object-src 'none';
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:;
+    font-src 'self';
+    connect-src 'self';
+    manifest-src 'self';
+    worker-src 'self';
+    form-action 'self';">
+
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ZapCast">
+
+  <title data-i18n="ui_title">ZapCast — Broadcast WhatsApp</title>
+
+  <link rel="stylesheet" href="/styles.css">
+
+  <!-- Pre-paint theme restore — synchronous, blocking, runs before any
+       stylesheet resolves so we avoid the light→dark flash on reload. -->
+  <script src="/theme-boot.js"></script>
+</head>
+<body>
+
+<div class="app">
+  <header class="header">
+    <button class="sidebar-toggle" id="sidebarToggle" aria-label="Menu" aria-controls="sidebar">&#x2630;</button>
+    <h1>
+      <span class="logo" aria-hidden="true">
+        <!-- Signal-tower brand glyph -->
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 9.5v3.5"/><circle cx="8" cy="8" r="1.4" fill="currentColor" stroke="none"/>
+          <path d="M5.4 5.4a3.7 3.7 0 0 0 0 5.2"/><path d="M10.6 5.4a3.7 3.7 0 0 1 0 5.2"/>
+          <path d="M3.6 3.6a6.3 6.3 0 0 0 0 8.8"/><path d="M12.4 3.6a6.3 6.3 0 0 1 0 8.8"/>
+        </svg>
+      </span>
+      <span data-i18n="ui_title">ZapCast</span>
+    </h1>
+    <span class="version" id="versionChip">v…</span>
+    <div class="topbar-right">
+      <div class="status" id="statusPill">
+        <span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span id="statusText" data-i18n="ui_status_disconnected">Desconectado</span>
+      </div>
+      <select id="langSelector" class="lang-btn" aria-label="Language">
+        <option value="en-US">English</option>
+        <option value="es-ES">Espa&ntilde;ol</option>
+        <option value="pt-BR" selected>Portugu&ecirc;s</option>
+      </select>
+      <button id="settingsToggle" class="icon-btn" aria-label="Settings" title="Settings">&#x2699;&#xfe0f;</button>
+      <button id="themeToggle" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
+        <span id="themeIcon">&#x2600;&#xfe0f;</span>
+      </button>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <nav>
+      <div class="nav-section" data-i18n="ui_nav_messages">Mensagens</div>
+      <a class="nav-item active" data-page="broadcast" href="#/broadcast">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5a4.5 4.5 0 0 1 9 0V12"/><path d="M3 6.5V12h9"/><circle cx="6" cy="9.5" r="0.6" fill="currentColor" stroke="none"/></svg>
+        <span class="lbl" data-i18n="ui_broadcast">Broadcast</span>
+      </a>
+      <div class="nav-section" data-i18n="ui_nav_audience">Audi&ecirc;ncia</div>
+      <a class="nav-item" data-page="contacts" href="#/contacts">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.3"/><path d="M2 13c.5-2 2-3.2 4-3.2S9.5 11 10 13"/><path d="M10.5 4a2.3 2.3 0 0 1 0 4.5"/><path d="M14 13c-.3-1.5-1.3-2.6-2.6-3"/></svg>
+        <span class="lbl" data-i18n="ui_contacts">Contatos</span>
+      </a>
+      <a class="nav-item" data-page="groups" href="#/groups">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="6" r="2.3"/><path d="M3 13.5c.6-2.4 2.6-3.8 5-3.8s4.4 1.4 5 3.8"/></svg>
+        <span class="lbl" data-i18n="ui_groups">Grupos</span>
+      </a>
+      <a class="nav-item" data-page="import" href="#/import">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10V2.5"/><path d="M5 5.5L8 2.5L11 5.5"/><path d="M2.5 11v1.5A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V11"/></svg>
+        <span class="lbl" data-i18n="ui_import_csv">Importar CSV</span>
+      </a>
+      <div class="nav-section" data-i18n="ui_nav_activity">Atividade</div>
+      <a class="nav-item" data-page="history" href="#/history">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></svg>
+        <span class="lbl" data-i18n="ui_history">Hist&oacute;rico</span>
+      </a>
+      <div class="nav-section" data-i18n="ui_nav_config">Configura&ccedil;&atilde;o</div>
+      <a class="nav-item" data-page="templates" href="#/templates">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3 3 8l2 5"/><path d="M11 3l2 5-2 5"/><path d="M9 6 7 10"/></svg>
+        <span class="lbl" data-i18n="ui_template_vars">Vari&aacute;veis</span>
+      </a>
+      <a class="nav-item" data-page="auth" href="#/auth">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4" height="4" rx="0.5"/><rect x="9.5" y="2.5" width="4" height="4" rx="0.5"/><rect x="2.5" y="9.5" width="4" height="4" rx="0.5"/><path d="M9.5 9.5h1.5v1.5"/><path d="M13.5 9.5v1.5"/><path d="M9.5 13.5h4"/><path d="M11.5 11.5v2"/></svg>
+        <span class="lbl" data-i18n="ui_login">Login QR</span>
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      &copy; <span id="footerYear"></span> ZapCast<br>
+      Built by <a href="https://fronteira.tech" target="_blank" rel="noopener noreferrer">fronteira.tech</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="conn-banner" id="connBanner" hidden role="alert">
+      <span data-i18n="msg_whatsapp_dropped">Conexão com o WhatsApp perdida — reconecte para continuar enviando.</span>
+      <a href="#/auth" data-i18n="ui_reconnect">Reconectar</a>
+    </div>
+
+    <!-- ─── Broadcast ──────────────────────────────────────────── -->
+    <section class="page active" id="page-broadcast">
+      <div class="page-head">
+        <div>
+          <h2 data-i18n="ui_broadcast">Broadcast</h2>
+          <p data-i18n="ui_broadcast_desc">Compose a single message and send it to many WhatsApp contacts or groups at once.</p>
+        </div>
+      </div>
+
+      <div class="panel onboard" id="onboardPanel" hidden>
+        <div class="panel-header">
+          <h2 data-i18n="ui_setup_title">Comece por aqui</h2>
+          <button class="btn btn-secondary btn-sm" id="onboardDismiss" data-i18n="ui_dismiss">Dispensar</button>
+        </div>
+        <ol class="onboard-list">
+          <li><a href="#/auth" data-i18n="ui_setup_1">Conecte o WhatsApp</a> <span class="onboard-check" id="onboardCheck1" hidden aria-hidden="true">✓</span></li>
+          <li><a href="#/contacts" data-i18n="ui_setup_2">Adicione contatos</a> <span class="onboard-check" id="onboardCheck2" hidden aria-hidden="true">✓</span></li>
+          <li><span data-i18n="ui_setup_3">Escreva e envie</span></li>
+        </ol>
+      </div>
+
+      <div class="stats" id="broadcastStats">
+        <div class="stat"><span class="lbl" data-i18n="ui_broadcast">Broadcasts</span><span class="v" id="statBroadcasts">&mdash;</span></div>
+        <div class="stat"><span class="lbl" data-i18n="msg_ok">Sent</span><span class="v" id="statSent">&mdash;</span></div>
+        <div class="stat"><span class="lbl" data-i18n="msg_delivered">Delivered</span><span class="v" id="statDelivered">&mdash;</span></div>
+        <div class="stat"><span class="lbl" data-i18n="msg_read">Read</span><span class="v" id="statRead">&mdash;</span></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><h2 data-i18n="ui_compose_broadcast">Compose broadcast</h2></div>
+
+        <div class="broadcast-tabs" role="tablist">
+          <button type="button" class="broadcast-tab active" data-mode="group" data-i18n="ui_groups">Grupo</button>
+          <button type="button" class="broadcast-tab" data-mode="contacts" data-i18n="ui_contacts">Contatos</button>
+        </div>
+
+        <div id="modeGroupPanel">
+          <div class="form-group">
+            <label for="broadcastGroup" data-i18n="ui_recipients_group">Grupo de Destinat&aacute;rios</label>
+            <select id="broadcastGroup"><option value="" data-i18n="placeholder_select_group">Selecione um grupo...</option></select>
+          </div>
+          <div id="broadcastGroupInfo" hidden style="margin-bottom:16px">
+            <div class="counter" id="broadcastCount"></div>
+            <div id="broadcastRecipients" style="max-height:120px;overflow-y:auto"></div>
+          </div>
+        </div>
+
+        <div id="modeContactsPanel" hidden>
+          <div class="form-group">
+            <label><span data-i18n="ui_contacts">Selecionar Contatos</span> <span id="broadcastContactsCount" style="color:var(--accent)"></span></label>
+            <div class="picker-container" id="broadcastContactPicker">
+              <div class="picker-search">
+                <input type="search" id="broadcastPickerSearch" placeholder="Filtrar contatos..." data-i18n-placeholder="placeholder_filter_contacts" aria-label="Filtrar contatos para broadcast">
+              </div>
+              <div class="picker-actions">
+                <button type="button" data-action="picker-select-all" data-target="broadcast" data-i18n="ui_select_all">Selecionar todos</button>
+                <button type="button" data-action="picker-clear" data-target="broadcast" data-i18n="ui_clear">Limpar</button>
+              </div>
+              <div id="broadcastPickerList"></div>
+            </div>
+          </div>
+          <div id="broadcastContactsInfo" hidden style="margin-bottom:16px">
+            <div class="counter" id="broadcastContactsCountText"></div>
+            <div id="broadcastContactsChips" style="max-height:160px;overflow-y:auto"></div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="broadcastMsg" data-i18n="ui_message">Mensagem</label>
+          <textarea id="broadcastMsg" placeholder="Digite a mensagem. Use {nome} para o nome do contato..." data-i18n-placeholder="placeholder_broadcast_msg"></textarea>
+          <div class="msg-meta"><span id="broadcastCharCount" aria-live="polite"></span></div>
+          <div style="margin-top:8px">
+            <span style="font-size:0.78rem;color:var(--text-muted)" data-i18n="ui_available_vars">Vari&aacute;veis dispon&iacute;veis (clique para inserir):</span>
+            <div class="var-tags" id="broadcastVarTags"></div>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <input type="file" id="broadcastFile" accept="image/*,video/mp4,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar" hidden>
+            <button type="button" class="btn btn-secondary btn-sm" id="broadcastAttachBtn">
+              &#x1F4CE; <span data-i18n="ui_attach_file">Anexar</span>
+            </button>
+            <div id="broadcastFilePreview" hidden style="flex:1;min-width:0"></div>
+          </div>
+        </div>
+
+        <div class="form-group" id="previewGroup" hidden>
+          <label data-i18n="ui_preview">Pr&eacute;-visualiza&ccedil;&atilde;o</label>
+          <div class="preview-box" id="msgPreview"></div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-primary" id="broadcastBtn" data-i18n="ui_send_broadcast">&#x1F4E8; Enviar para Todos</button>
+          <button class="btn btn-secondary" id="broadcastTestBtn" data-i18n="ui_send_test">Enviar teste</button>
+        </div>
+      </div>
+
+      <div class="panel" id="broadcastProgress" hidden>
+        <div class="panel-header"><h2 data-i18n="ui_broadcast_progress">Envio em andamento</h2></div>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-info" id="progressInfo"></div>
+        <div class="btn-group" style="margin-top:12px">
+          <button class="btn btn-danger btn-sm" id="broadcastCancelBtn" data-i18n="ui_cancel_broadcast">Cancelar envio</button>
+        </div>
+      </div>
+
+      <div class="panel" id="broadcastResults" hidden>
+        <div class="panel-header"><h2 data-i18n="ui_results">Resultado</h2></div>
+        <div class="summary-cards" id="broadcastSummary"></div>
+        <div id="broadcastResultsList"></div>
+      </div>
+    </section>
+
+    <!-- ─── Contacts ───────────────────────────────────────────── -->
+    <section class="page" id="page-contacts">
+      <div class="panel">
+        <div class="panel-header">
+          <h2 data-i18n="ui_contacts">Contatos</h2>
+          <button class="btn btn-primary btn-sm" id="contactAddBtn" data-i18n="ui_add_contact">+ Novo Contato</button>
+        </div>
+
+        <div class="inline-form" id="contactForm">
+          <input type="hidden" id="contactEditId">
+          <div class="input-row">
+            <div class="form-group">
+              <label for="contactName" data-i18n="ui_name">Nome</label>
+              <input type="text" id="contactName" placeholder="Nome do contato" data-i18n-placeholder="placeholder_contact_name">
+            </div>
+            <div class="form-group">
+              <label for="contactPhone" data-i18n="ui_phone">Telefone</label>
+              <input type="text" id="contactPhone" placeholder="5511999998888" inputmode="tel" aria-describedby="contactPhoneError">
+              <div class="field-error" id="contactPhoneError" hidden></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label data-i18n="ui_groups_label">Grupos</label>
+            <div id="contactGroupPicker" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+            <div style="display:flex;gap:6px;margin-top:10px">
+              <input type="text" id="newGroupInline" placeholder="Criar novo grupo..." data-i18n-placeholder="placeholder_new_group" style="flex:1">
+              <button type="button" class="btn btn-secondary btn-sm" id="newGroupInlineBtn" data-i18n="ui_add">+ Criar</button>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success btn-sm" id="contactSaveBtn" data-i18n="ui_save">Salvar</button>
+            <button class="btn btn-secondary btn-sm" id="contactCancelBtn" data-i18n="ui_cancel">Cancelar</button>
+          </div>
+        </div>
+
+        <div class="search-bar">
+          <input type="search" id="contactSearch" placeholder="Buscar contato..." data-i18n-placeholder="placeholder_search_contact" aria-label="Buscar contato">
+        </div>
+        <div class="counter" id="contactCounter"></div>
+        <div id="contactsList"></div>
+        <div id="contactsMore" style="text-align:center;padding:12px" hidden>
+          <button class="btn btn-secondary btn-sm" id="contactsMoreBtn" data-i18n="ui_load_more">Carregar mais...</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── Groups ─────────────────────────────────────────────── -->
+    <section class="page" id="page-groups">
+      <div class="panel">
+        <div class="panel-header">
+          <h2 data-i18n="ui_groups">Grupos</h2>
+          <button class="btn btn-primary btn-sm" id="groupAddBtn" data-i18n="ui_add">+ Novo Grupo</button>
+        </div>
+
+        <div class="inline-form" id="groupForm">
+          <input type="hidden" id="groupEditId">
+          <div class="form-group">
+            <label for="groupNameInput" data-i18n="ui_name">Nome do Grupo</label>
+            <input type="text" id="groupNameInput" placeholder="Ex: Condom&iacute;nos" data-i18n-placeholder="placeholder_group_name">
+          </div>
+          <div class="form-group">
+            <label><span data-i18n="ui_contacts">Contatos</span> <span id="groupPickerCount" style="color:var(--accent)"></span></label>
+            <div class="picker-container" id="groupContactPicker">
+              <div class="picker-search">
+                <input type="search" id="groupPickerSearch" placeholder="Filtrar contatos..." data-i18n-placeholder="placeholder_filter_contacts" aria-label="Filtrar contatos do grupo">
+              </div>
+              <div class="picker-actions">
+                <button type="button" data-action="picker-select-all" data-target="group" data-i18n="ui_select_all">Selecionar todos</button>
+                <button type="button" data-action="picker-clear" data-target="group" data-i18n="ui_clear">Limpar</button>
+              </div>
+              <div id="groupPickerList"></div>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success btn-sm" id="groupSaveBtn" data-i18n="ui_save">Salvar</button>
+            <button class="btn btn-secondary btn-sm" id="groupCancelBtn" data-i18n="ui_cancel">Cancelar</button>
+          </div>
+        </div>
+
+        <div class="search-bar">
+          <input type="search" id="groupSearch" placeholder="Buscar grupo..." data-i18n-placeholder="placeholder_search_group" aria-label="Buscar grupo">
+        </div>
+        <div id="groupsList"></div>
+      </div>
+    </section>
+
+    <!-- ─── Import ─────────────────────────────────────────────── -->
+    <section class="page" id="page-import">
+      <div class="panel">
+        <div class="panel-header">
+          <h2 data-i18n="ui_import_csv">Importar Contatos (CSV)</h2>
+          <button class="btn btn-secondary btn-sm" id="exportContactsBtn" data-i18n="ui_export_csv">&#x1F4E4; Exportar CSV</button>
+        </div>
+        <p style="color:var(--text-dim);margin-bottom:16px;font-size:0.88rem" data-i18n="ui_import_desc">
+          Aceita exports do <strong>Google Contacts</strong>, <strong>Outlook</strong> e o formato simples <strong>Nome,Telefone,Grupo</strong>.
+        </p>
+        <div class="drop-zone" id="importDrop">
+          <input type="file" id="importFile" accept=".csv,.txt">
+          <p style="font-size:1.2rem;margin-bottom:8px">&#x1F4C4;</p>
+          <p data-i18n="ui_dropzone">Arraste um CSV aqui ou clique para selecionar</p>
+          <p style="font-size:0.78rem;margin-top:8px;color:var(--text-muted)" data-i18n="ui_dropzone_formats">Google CSV, Outlook CSV, ou Nome,Telefone[,Grupo]</p>
+        </div>
+
+        <div id="importPreview" hidden style="margin-top:20px">
+          <div class="counter" id="importPreviewCount"></div>
+          <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:16px" id="importPreviewTable"></div>
+          <div class="btn-group">
+            <button class="btn btn-primary" id="importBtn" data-i18n="ui_import_csv">&#x1F4E5; Importar</button>
+            <button class="btn btn-secondary" id="importCancelBtn" data-i18n="ui_cancel">Cancelar</button>
+          </div>
+        </div>
+
+        <div id="importResult" hidden style="margin-top:20px">
+          <div class="summary-cards" id="importSummary"></div>
+          <div id="importGroupsNote" style="margin-top:8px;color:var(--text-dim);font-size:0.85rem"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── Templates ──────────────────────────────────────────── -->
+    <section class="page" id="page-templates">
+      <div class="panel">
+        <div class="panel-header">
+          <h2 data-i18n="ui_template_vars">Vari&aacute;veis de Template</h2>
+          <button class="btn btn-primary btn-sm" id="templateAddBtn" data-i18n="ui_add">+ Nova Vari&aacute;vel</button>
+        </div>
+
+        <p style="color:var(--text-dim);margin-bottom:16px;font-size:0.88rem" data-i18n="ui_template_desc">
+          Crie vari&aacute;veis personalizadas para usar nas mensagens de broadcast.
+          Vari&aacute;veis embutidas:
+          <code style="color:var(--green)">{nome}</code>,
+          <code style="color:var(--green)">{telefone}</code>.
+        </p>
+
+        <div class="inline-form" id="templateForm">
+          <div class="input-row">
+            <div class="form-group">
+              <label for="templateKey" data-i18n="ui_key">Nome da Vari&aacute;vel</label>
+              <input type="text" id="templateKey" placeholder="Ex: assinatura" data-i18n-placeholder="placeholder_template_key">
+            </div>
+            <div class="form-group">
+              <label for="templateValue" data-i18n="ui_value">Valor</label>
+              <input type="text" id="templateValue" placeholder="Ex: Enviado por CEAC" data-i18n-placeholder="placeholder_template_value">
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success btn-sm" id="templateSaveBtn" data-i18n="ui_save">Salvar</button>
+            <button class="btn btn-secondary btn-sm" id="templateCancelBtn" data-i18n="ui_cancel">Cancelar</button>
+          </div>
+        </div>
+
+        <div style="margin-bottom:16px">
+          <span style="font-size:0.82rem;color:var(--text-muted);font-weight:600" data-i18n="ui_system_vars">Vari&aacute;veis do sistema</span>
+          <div class="var-tags" style="margin-top:6px">
+            <span class="var-tag builtin">{nome}</span>
+            <span class="var-tag builtin">{name}</span>
+            <span class="var-tag builtin">{telefone}</span>
+            <span class="var-tag builtin">{phone}</span>
+          </div>
+        </div>
+
+        <div id="templatesList"></div>
+      </div>
+    </section>
+
+    <!-- ─── History ────────────────────────────────────────────── -->
+    <section class="page" id="page-history">
+      <div class="panel">
+        <div class="panel-header">
+          <h2 data-i18n="ui_history">Hist&oacute;rico</h2>
+          <button class="btn btn-secondary btn-sm" id="historyRefreshBtn" data-i18n="ui_refresh">&#x21BB; Atualizar</button>
+        </div>
+        <div class="summary-cards" id="statsCards"></div>
+        <div class="history-filters">
+          <input type="search" id="historySearch" placeholder="Buscar no histórico..." data-i18n-placeholder="placeholder_search_history" aria-label="Buscar no histórico">
+          <select id="historyStatusFilter" aria-label="Filtrar por resultado">
+            <option value="all" data-i18n="ui_all">Todos</option>
+            <option value="failed" data-i18n="ui_with_failures">Com falhas</option>
+            <option value="clean" data-i18n="ui_without_failures">Sem falhas</option>
+          </select>
+        </div>
+        <div id="historyList" style="margin-top:20px"></div>
+      </div>
+    </section>
+
+    <!-- ─── Auth ───────────────────────────────────────────────── -->
+    <section class="page" id="page-auth">
+      <div class="panel">
+        <div class="panel-header"><h2 data-i18n="ui_login">Autentica&ccedil;&atilde;o WhatsApp</h2></div>
+        <div id="authConnected" hidden>
+          <p style="margin-bottom:16px;color:var(--green)" data-i18n="ui_status_connected">Conectado ao WhatsApp</p>
+          <p style="margin-bottom:16px;color:var(--text-dim)"><span data-i18n="ui_phone">Telefone</span>: <strong id="authPhone"></strong></p>
+          <button class="btn btn-danger" id="logoutBtn" data-i18n="ui_logout">Desconectar</button>
+        </div>
+        <div id="authDisconnected">
+          <p style="margin-bottom:16px;color:var(--text-dim)" data-i18n="ui_qr_instructions">Escaneie o QR Code com o WhatsApp para conectar.</p>
+          <button class="btn btn-primary" id="authBtn" data-i18n="ui_login">&#x1F4F1; Gerar QR Code</button>
+          <div class="qr-container" id="qrContainer" hidden>
+            <img id="qrImg" alt="QR Code" width="280" height="280">
+            <div class="qr-status" id="qrStatus" data-i18n="ui_qr_waiting">Aguardando leitura...</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+<div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
+<div class="toast-container" id="toastErrorContainer" aria-live="assertive" aria-atomic="false"></div>
+
+<!-- Generic confirm modal -->
+<div class="modal-backdrop" id="modalBackdrop" role="presentation">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalMsg" id="modalDialog" tabindex="-1">
+    <h3 id="modalTitle" data-i18n="ui_confirm">Confirmar</h3>
+    <p id="modalMsg"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary btn-sm" id="modalCancel" data-i18n="ui_cancel">Cancelar</button>
+      <button type="button" class="btn btn-primary btn-sm" id="modalConfirm" data-i18n="ui_confirm">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Auth token prompt -->
+<div class="modal-backdrop" id="authBackdrop" role="presentation">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle" aria-describedby="authMsg" id="authDialog" tabindex="-1">
+    <h3 id="authTitle" data-i18n="ui_auth_token_title">Token de acesso</h3>
+    <p id="authMsg" data-i18n="ui_auth_token_desc">A API exige autentica&ccedil;&atilde;o. Informe o token configurado em <code>AUTH_TOKEN</code>.</p>
+    <input type="password" id="authInput" autocomplete="off" spellcheck="false"
+           style="width:100%;padding:10px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.9rem;margin-bottom:14px;outline:none">
+    <div class="modal-actions">
+      <button type="button" class="btn btn-primary btn-sm" id="authSubmit" data-i18n="ui_login_enter">Entrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings drawer -->
+<div class="modal-backdrop" id="settingsBackdrop" role="presentation">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" id="settingsDialog" tabindex="-1">
+    <h3 id="settingsTitle" data-i18n="ui_settings">Apar&ecirc;ncia</h3>
+
+    <div class="settings-group">
+      <label data-i18n="ui_settings_accent">Cor de destaque</label>
+      <div class="swatches" role="radiogroup" aria-label="Accent">
+        <button type="button" class="swatch" data-accent="volt" title="Volt" aria-label="Volt"></button>
+        <button type="button" class="swatch" data-accent="indigo" title="Indigo" aria-label="Indigo"></button>
+        <button type="button" class="swatch" data-accent="coral" title="Coral" aria-label="Coral"></button>
+        <button type="button" class="swatch" data-accent="cyan" title="Cyan" aria-label="Cyan"></button>
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <label data-i18n="ui_settings_density">Densidade</label>
+      <div class="seg" role="radiogroup" aria-label="Density">
+        <button type="button" data-density="compact" data-i18n="ui_density_compact">Compacta</button>
+        <button type="button" data-density="regular" data-i18n="ui_density_regular">Padr&atilde;o</button>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-primary btn-sm" id="settingsClose" data-i18n="ui_close">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

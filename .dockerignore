@@ -1,0 +1,13 @@
+.git
+.gitignore
+*.md
+store/
+zapcast
+zapcast-go-tmp-umask
+*.db
+*.db-wal
+*.db-shm
+.env*
+*.local
+*.key
+*.pem

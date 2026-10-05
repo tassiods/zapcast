@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest a new feature or improvement
+title: "feat: <short description>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an idea! Please describe the problem first and
+        the proposed solution second — that helps us evaluate alternatives.
+
+        Note: features whose only purpose is to enable spam, evade rate
+        limits, or impersonate users will not be accepted. See
+        [CONTRIBUTING.md](https://github.com/tassiods/zapcast/blob/master/docs/CONTRIBUTING.md#project-values).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What use case is currently painful or impossible?
+      placeholder: |
+        "Today I cannot ... because ZapCast does not ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like ZapCast to do? Include rough API or UI sketches if helpful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why you ruled them out.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, links to similar features in other tools, etc.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This proposal is consistent with the project's values (no spam-enabling features).
+          required: true
+        - label: I agree to follow this project's Code of Conduct.
+          required: true

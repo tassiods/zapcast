@@ -1,0 +1,65 @@
+ZapCast
+Copyright 2025 ZapCast contributors
+
+Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+Any redistribution, fork, derivative work, or substantial reuse of this
+source code must retain this NOTICE file and provide visible attribution
+to:
+
+    ZapCast contributors — https://github.com/tassiods/zapcast
+
+as required by Section 4(d) of the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+Third-party software
+--------------------------------------------------------------------------------
+
+This product depends on and links against the following third-party
+libraries. Their licenses are reproduced or referenced below. Each library
+remains the property of its respective authors and is governed by its own
+license terms.
+
+1. whatsmeow
+   Copyright (c) Tulir Asokan
+   Source:  https://github.com/tulir/whatsmeow
+   License: Mozilla Public License Version 2.0 (MPL-2.0)
+            https://www.mozilla.org/en-US/MPL/2.0/
+
+   ZapCast uses whatsmeow as an unmodified Go module dependency for the
+   WhatsApp Multi-Device protocol. No source files of whatsmeow have been
+   modified. Per MPL-2.0:
+     - The source code of whatsmeow is publicly available at the URL above.
+     - Any modifications you make to whatsmeow source files must be released
+       under the MPL-2.0.
+     - Notices contained in whatsmeow source files must not be removed or
+       altered.
+
+2. go.mau.fi/libsignal
+   License: as published by the upstream project (see go.mau.fi/libsignal
+            module sources).
+
+3. go.mau.fi/util
+   License: as published by the upstream project (see go.mau.fi/util
+            module sources).
+
+4. github.com/mattn/go-sqlite3
+   License: MIT.
+
+5. google.golang.org/protobuf
+   Copyright (c) Google LLC.
+   License: BSD-3-Clause.
+
+6. Other transitive dependencies
+   See go.sum and the source repositories of each module for full license
+   texts. All such licenses are preserved as part of the Go module cache
+   when this software is built.
+
+--------------------------------------------------------------------------------
+Trademarks
+--------------------------------------------------------------------------------
+
+WhatsApp is a trademark of Meta Platforms, Inc. ZapCast is not affiliated
+with, endorsed by, or sponsored by WhatsApp / Meta. Use of the WhatsApp
+service through this software is subject to WhatsApp's Terms of Service —
+the user is solely responsible for compliance.

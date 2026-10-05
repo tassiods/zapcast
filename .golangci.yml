@@ -1,0 +1,73 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - gosec
+    - copyloopvar
+    - forbidigo
+  settings:
+    forbidigo:
+      forbid:
+        # Prevent reintroduction of fmt.Sprintf-built SQL queries. The
+        # ContactStore route binds JSON arrays via json_each for IN
+        # clauses; if a future contributor reaches for fmt.Sprintf to
+        # paste table or column names into a string, the lint flags the
+        # call so the review catches it. Use parameter binding instead.
+        - pattern: 'fmt\.Sprintf\(.*\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b'
+          msg: "Don't build SQL with fmt.Sprintf — use ? placeholders or json_each (see contacts.go)."
+      analyze-types: false
+      exclude-godoc-examples: true
+    errcheck:
+      # Deferred cleanup of Close/Rollback is idiomatic Go and never produces
+      # a useful error in the failure path — silence the noise so errcheck can
+      # surface real ignored returns.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*database/sql.Tx).Commit
+        - (*net/http.Response).Body.Close
+        - encoding/json.NewEncoder.Encode
+        - (*encoding/json.Encoder).Encode
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        - (net/http.ResponseWriter).Write
+    gosec:
+      excludes:
+        # G104: errcheck already covers this with finer control.
+        - G104
+        # G404: math/rand is fine for broadcast jitter, not used for crypto.
+        - G404
+        # G115: integer-overflow on UTF-16 byte conversion is guarded by the
+        # surrounding length math; flagged false positives in CSV parsing.
+        - G115
+    staticcheck:
+      checks:
+        - all
+        # SA1019: deprecation warnings on whatsmeow's waProto are tracked
+        # separately; suppress here so the linter doesn't gate on a migration
+        # that isn't in this PR's scope.
+        - "-SA1019"
+        # QF*: stylistic refactor suggestions (tagged switch, etc.). Useful but
+        # not worth churn now.
+        - "-QF1001"
+        - "-QF1002"
+        - "-QF1003"
+        - "-QF1008"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

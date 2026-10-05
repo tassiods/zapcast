@@ -1,0 +1,36 @@
+# Runtime-only image: the Go binary is built OUTSIDE the CT (pve) because
+# CT224 has 256 MiB RAM and the whatsmeow/cgo compile gets OOM-killed
+# (`compile: signal: killed`) inside it. Build the binary on a host with
+# >=2 GiB free (CGO_ENABLED=1, same GOOS/GOARCH) and place it next to this
+# file as `zapcast-linux-amd64` (that exact name — `.dockerignore` excludes
+# the bare `zapcast` build artifact) before running:
+#   docker build -t zapcast:<ver> -f Dockerfile.runtime .
+#
+# NOTE: debian-slim (not alpine) on purpose — a glibc-built binary fails on
+# alpine with `fcntl64: symbol not found` (Debian 14 glibc vs musl compat).
+FROM debian:13-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates tzdata wget && \
+    rm -rf /var/lib/apt/lists && \
+    groupadd -r -g 101 app && useradd -r -u 100 -g 101 app
+
+WORKDIR /app
+COPY zapcast-linux-amd64 /app/zapcast
+
+RUN chmod 755 /app/zapcast && mkdir -p /app/store && chown -R app:app /app/store /app/zapcast
+
+ENV HOST=0.0.0.0 \
+    PORT=3000 \
+    STORE_DIR=/app/store \
+    LOG_FORMAT=json \
+    LOG_LEVEL=info
+
+VOLUME ["/app/store"]
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://localhost:3000/healthz || exit 1
+
+USER app
+ENTRYPOINT ["/app/zapcast"]

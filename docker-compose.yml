@@ -1,0 +1,33 @@
+services:
+  zapcast:
+    build: .
+    image: zapcast:latest
+    container_name: zapcast
+    restart: unless-stopped
+    # Default: bind the host port to 127.0.0.1 only — the app has no built-in
+    # authentication, so anything wider needs a reverse-proxy with TLS + auth
+    # (or `AUTH_TOKEN` set). Override with `ZAPCAST_BIND=0.0.0.0 PORT=3000`
+    # in your shell / .env to expose on the LAN.
+    ports:
+      - "${ZAPCAST_BIND:-127.0.0.1}:${PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      STORE_DIR: /app/store
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      # Set AUTH_TOKEN to require a bearer token on every API request.
+      # AUTH_TOKEN: ""
+    volumes:
+      - zapcast_store:/app/store
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  zapcast_store:
