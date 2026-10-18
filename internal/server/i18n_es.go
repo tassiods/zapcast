@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -9,7 +9,7 @@ package server
 // "Nome"/"Telefone" (Portuguese).
 
 func init() {
-	translations[langEsES] = map[string]string{ // #nosec G101 -- UI translation literals; no credentials.
+	translations[langEsES] = map[string]string{
 		// --- JSON error messages (handlers) ---
 		"err_invalid_json":          "JSON no valido",
 		"err_name_phone_required":   "name y phone son obligatorios",

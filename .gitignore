@@ -14,3 +14,5 @@ internal/server/web/dist/
 # Test runner artefacts
 test-results/
 playwright-report/
+__pycache__/
+release-artifacts/

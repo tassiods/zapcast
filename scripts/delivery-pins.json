@@ -1,0 +1,62 @@
+{
+  "verified_date": "2026-10-05",
+  "node": "22.23.3",
+  "npm": "12.2.0",
+  "go": "1.26.9",
+  "go_security_pin_verified_date": "2026-10-18",
+  "golangci-lint": "2.14.0",
+  "govulncheck": "1.1.4",
+  "actions": {
+    "actions/checkout": {
+      "tag": "v4",
+      "sha": "11d5960a326750d5838078e36cf38b85af677262",
+      "source": "https://api.github.com/repos/actions/checkout/commits/v4"
+    },
+    "actions/setup-node": {
+      "tag": "v4",
+      "sha": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "source": "https://api.github.com/repos/actions/setup-node/commits/v4"
+    },
+    "actions/setup-go": {
+      "tag": "v5",
+      "sha": "40f1582b2485089dde7abd97c1529aa768e1baff",
+      "source": "https://api.github.com/repos/actions/setup-go/commits/v5"
+    },
+    "actions/upload-artifact": {
+      "tag": "v4",
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "source": "https://api.github.com/repos/actions/upload-artifact/commits/v4"
+    },
+    "actions/download-artifact": {
+      "tag": "v4",
+      "sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+      "source": "https://api.github.com/repos/actions/download-artifact/commits/v4"
+    }
+  },
+  "containers": {
+    "golang:1.26.9-alpine": {
+      "digest": "sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade",
+      "source": "https://registry-1.docker.io/v2/library/golang/manifests/1.26.9-alpine"
+    },
+    "node:22.23.3-alpine": {
+      "digest": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+      "source": "https://registry-1.docker.io/v2/library/node/manifests/22.23.3-alpine"
+    },
+    "alpine:3.23": {
+      "digest": "sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0",
+      "source": "https://registry-1.docker.io/v2/library/alpine/manifests/3.23"
+    },
+    "debian:13-slim": {
+      "digest": "sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a",
+      "source": "https://registry-1.docker.io/v2/library/debian/manifests/13-slim"
+    },
+    "gcr.io/distroless/base-debian13:nonroot": {
+      "digest": "sha256:a0d70d6a97cd697d9362bc2aae4a6560dd65817e365d0043b07325a97975dc91",
+      "source": "https://gcr.io/v2/distroless/base-debian13/manifests/nonroot"
+    }
+  },
+  "official_go_releases": [
+    "go1.27.2",
+    "go1.26.9"
+  ]
+}

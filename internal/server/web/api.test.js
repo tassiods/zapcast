@@ -10,6 +10,8 @@ import {
   clearAuthToken,
   withAuthQuery,
   setUnauthorizedHandler,
+  invalidateSession,
+  beginSession,
 } from './api.js';
 
 const originalFetch = globalThis.fetch;
@@ -17,6 +19,7 @@ const originalFetch = globalThis.fetch;
 beforeEach(() => {
   // Clean state per test: token + 401 handler.
   clearAuthToken();
+  beginSession();
   setUnauthorizedHandler(() => {});
 });
 
@@ -37,9 +40,10 @@ function jsonResponse(body, { status = 200, statusText = 'OK' } = {}) {
 }
 
 describe('auth-token storage', () => {
-  it('reads and writes through sessionStorage', () => {
+  it('discards supplied credentials instead of writing sessionStorage', () => {
     setAuthToken('alpha');
-    expect(getAuthToken()).toBe('alpha');
+    expect(getAuthToken()).toBe('');
+    expect(sessionStorage.getItem('zapcast_auth_token')).toBeNull();
     clearAuthToken();
     expect(getAuthToken()).toBe('');
   });
@@ -54,35 +58,60 @@ describe('withAuthQuery', () => {
     expect(withAuthQuery('/api/x')).toBe('/api/x');
   });
 
-  it('appends ?token= when no query string is present', () => {
+  it('never appends credentials to a plain URL', () => {
     setAuthToken('abc');
-    expect(withAuthQuery('/api/x')).toBe('/api/x?token=abc');
+    expect(withAuthQuery('/api/x')).toBe('/api/x');
   });
 
-  it('appends &token= when the URL already carries a query string', () => {
+  it('never appends credentials to an existing query', () => {
     setAuthToken('abc');
-    expect(withAuthQuery('/api/x?y=1')).toBe('/api/x?y=1&token=abc');
+    expect(withAuthQuery('/api/x?y=1')).toBe('/api/x?y=1');
   });
 
-  it('URL-encodes tokens so reserved characters survive the trip', () => {
+  it('never includes a credential containing reserved characters', () => {
     setAuthToken('a b/c');
-    expect(withAuthQuery('/api/x')).toBe('/api/x?token=a%20b%2Fc');
+    expect(withAuthQuery('/api/x')).toBe('/api/x');
   });
 });
 
 describe('api()', () => {
+  it('fails closed on SSO redirects/network errors and forbidden or HTML API responses', async () => {
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    globalThis.fetch = vi.fn(() => Promise.reject(new TypeError('redirect blocked')));
+    await expect(api('/api/status')).rejects.toMatchObject({status:401});
+    expect(handler).toHaveBeenCalledTimes(1);
+    mockFetch(new Response('SSO', {status:403}));
+    await expect(api('/api/status')).rejects.toMatchObject({status:401});
+    mockFetch(new Response('<html>SSO</html>', {status:200,headers:{'Content-Type':'text/html'}}));
+    await expect(api('/api/status')).rejects.toMatchObject({status:401});
+    expect(handler).toHaveBeenCalledTimes(3);
+  });
+  it('rejects late private responses after session invalidation', async () => {
+    let finish = (_response) => {};
+    globalThis.fetch = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    const pending = api('/api/contacts');
+    invalidateSession();
+    finish(jsonResponse([{name:'PRIVATE LATE'}]));
+    await expect(pending).rejects.toMatchObject({status:401});
+    mockFetch(jsonResponse([{name:'PRIVATE NEW'}]));
+    await expect(api('/api/contacts')).rejects.toMatchObject({status:401});
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
   it('returns the decoded JSON payload on success', async () => {
     mockFetch(jsonResponse({ hello: 'world' }));
     await expect(api('/api/x')).resolves.toEqual({ hello: 'world' });
   });
 
-  it('attaches Authorization when a token is set', async () => {
+  it('uses cookie-only no-store fetch even if a legacy caller supplies a token', async () => {
     setAuthToken('bearer-x');
     mockFetch(jsonResponse({ ok: true }));
     await api('/api/x');
     const fetchMock = /** @type {import('vitest').Mock} */ (/** @type {unknown} */ (globalThis.fetch));
     const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers.Authorization).toBe('Bearer bearer-x');
+    expect(opts.headers.Authorization).toBeUndefined();
+    expect(opts.credentials).toBe('same-origin');
+    expect(opts.cache).toBe('no-store');
   });
 
   it('throws an HttpError with .code from a structured backend error', async () => {

@@ -1,137 +1,54 @@
 name: release
 
+# Explicit publication, never dependent on token-generated tag events.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Reviewed version (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      publish:
+        description: Publish after all same-SHA gates (false is credential-free dry-run)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: build-${{ matrix.target.os }}-${{ matrix.target.arch }}
-    runs-on: ${{ matrix.target.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # darwin-amd64 dropped: macos-13 (Intel) runners were timing out in
-        # the GitHub Actions queue for 24h+. Intel Mac users on a release
-        # build can compile from source — see the Quickstart in README.md.
-        target:
-          - { os: linux,   arch: amd64, runner: ubuntu-latest,    ext: "" }
-          - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm, ext: "" }
-          - { os: darwin,  arch: arm64, runner: macos-14,         ext: "" }
-          - { os: windows, arch: amd64, runner: windows-latest,   ext: ".exe" }
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-
-      - name: build SPA bundle
-        shell: bash
-        # The prod-tagged Go build embeds web/dist; run Vite before
-        # touching the toolchain so the embed has something to grab.
-        run: |
-          npm ci || npm install
-          npm run build
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: build binary
-        shell: bash
-        env:
-          CGO_ENABLED: "1"
-          VERSION: ${{ github.ref_name }}
-        run: |
-          out="zapcast-${VERSION}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.ext }}"
-          # -tags prod switches the embed root from web/ to web/dist, so
-          # the binary serves the minified Vite output.
-          # -ldflags injects the canonical version reported by /api/status.
-          go build -trimpath -tags prod \
-            -ldflags "-s -w -X zapcast/internal/server.versionLdflag=${VERSION}" \
-            -o "$out" .
-          ls -la "$out"
-          echo "ARTIFACT_NAME=$out" >> "$GITHUB_ENV"
-
-      - name: package archive
-        shell: bash
-        run: |
-          base="zapcast-${{ github.ref_name }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
-          mkdir -p "dist/$base"
-          cp "$ARTIFACT_NAME" "dist/$base/zapcast${{ matrix.target.ext }}"
-          cp README.md CHANGELOG.md SECURITY.md docs/LICENSE docs/NOTICE "dist/$base/"
-          if [ "${{ matrix.target.os }}" = "windows" ]; then
-            cd dist && 7z a "${base}.zip" "$base" && cd ..
-            echo "ARCHIVE=dist/${base}.zip" >> "$GITHUB_ENV"
-          else
-            tar -C dist -czf "dist/${base}.tar.gz" "$base"
-            echo "ARCHIVE=dist/${base}.tar.gz" >> "$GITHUB_ENV"
-          fi
-
-      - name: upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zapcast-${{ matrix.target.os }}-${{ matrix.target.arch }}
-          path: ${{ env.ARCHIVE }}
-          retention-days: 7
-
+  gates:
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ inputs.version }}
   publish:
-    name: publish release
-    needs: build
-    runs-on: ubuntu-latest
+    needs: gates
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    # Configure required reviewers for this environment before enabling publication.
+    environment: production-release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          path: dist
-          merge-multiple: true
-
-      - name: compute checksums
-        run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: extract changelog section for this tag
-        id: changelog
-        run: |
-          tag="${{ github.ref_name }}"
-          # Pull the section between "## [<tag>]" and the next "## [" header.
-          notes=$(awk -v tag="$tag" '
-            $0 ~ "^## \\[" tag "\\]" { capture=1; next }
-            capture && /^## \[/ { exit }
-            capture { print }
-          ' CHANGELOG.md)
-          if [ -z "$notes" ]; then
-            notes="See [CHANGELOG.md](CHANGELOG.md) for details."
-          fi
-          {
-            echo 'BODY<<EOF_RELEASE_NOTES'
-            echo "$notes"
-            echo
-            echo "## Verifying downloads"
-            echo
-            echo '```sh'
-            echo 'sha256sum -c SHA256SUMS'
-            echo '```'
-            echo 'EOF_RELEASE_NOTES'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: create GitHub release
-        uses: softprops/action-gh-release@v2
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ZapCast ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.BODY }}
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            dist/*
+          name: tested-release-${{ github.sha }}
+          path: release-artifacts
+      - name: Validate the exact tested artifact; no rebuild
+        run: python3 scripts/release.py --dry-run --version "$VERSION" --artifacts release-artifacts --sha "$GITHUB_SHA"
+      - name: Publish validated artifact
+        if: inputs.publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/release.py --publish --version "$VERSION" --artifacts release-artifacts --sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"

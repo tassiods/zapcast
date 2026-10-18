@@ -35,7 +35,7 @@
 
   <!-- Pre-paint theme restore — synchronous, blocking, runs before any
        stylesheet resolves so we avoid the light→dark flash on reload. -->
-  <script src="/theme-boot.js"></script>
+  <script vite-ignore src="/theme-boot.js"></script>
 </head>
 <body>
 
@@ -64,6 +64,8 @@
         <option value="es-ES">Espa&ntilde;ol</option>
         <option value="pt-BR" selected>Portugu&ecirc;s</option>
       </select>
+      <button id="swUpdateBtn" class="btn btn-secondary btn-sm" hidden>Atualizar aplicativo</button>
+      <button id="appLogoutBtn" class="btn btn-secondary btn-sm">Sair do aplicativo</button>
       <button id="settingsToggle" class="icon-btn" aria-label="Settings" title="Settings">&#x2699;&#xfe0f;</button>
       <button id="themeToggle" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
         <span id="themeIcon">&#x2600;&#xfe0f;</span>
@@ -411,6 +413,7 @@
           </select>
         </div>
         <div id="historyList" style="margin-top:20px"></div>
+        <div id="deliveryReview" style="margin-top:20px"></div>
       </div>
     </section>
 

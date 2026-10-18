@@ -16,6 +16,13 @@ linters:
     - gosec
     - copyloopvar
     - forbidigo
+  exclusions:
+    rules:
+      # Translation strings contain words such as token/password, not credentials.
+      # Keep G101 enabled everywhere else, and all other rules in these files.
+      - path: '^internal/server/i18n_(es|pt)\.go$'
+        linters: [gosec]
+        text: 'G101:'
   settings:
     forbidigo:
       forbid:

@@ -1,6 +1,6 @@
-// api.js — HTTP helpers + auth-token plumbing.
+// api.js — cookie-only HTTP helpers and private-session lifecycle.
 //
-// Everything goes through `request()` so the 401 handler, auth header and
+// Everything goes through `apiFetch()` so the 401 handler, cookies and
 // error normalisation are consistent. `api()` is the JSON convenience wrapper
 // most callers use; `apiFormData()` keeps the multipart path (file uploads)
 // without forcing a Content-Type on FormData.
@@ -8,32 +8,31 @@
 const API_BASE = '';
 const TOKEN_KEY = 'zapcast_auth_token';
 
-/** @returns {string} Empty when no token has been stored. */
-export function getAuthToken() {
-  try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
-}
-
-export function setAuthToken(tok) {
-  try { sessionStorage.setItem(TOKEN_KEY, tok); } catch { /* private mode */ }
-}
+// Migration shims: never retain a master credential. Remove legacy copies.
+export function getAuthToken() { clearAuthToken(); return ''; }
+export function setAuthToken(_tok) { clearAuthToken(); }
 
 export function clearAuthToken() {
   try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
 }
 
 /**
- * Append `?token=` for the URLs that can't carry an Authorization header
- * (EventSource, plain `<img src>` etc).
+ * Legacy compatibility shim: never append credentials to a URL.
  *
  * @param {string} url
  * @returns {string}
  */
 export function withAuthQuery(url) {
-  const tok = getAuthToken();
-  if (!tok) return url;
-  return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(tok);
+  return url;
 }
 
+let sessionEpoch = 0;
+let sessionInvalid = false;
+let sessionController = new AbortController();
+export function beginSession() { sessionEpoch++; sessionInvalid = false; sessionController = new AbortController(); }
+export function invalidateSession() {
+  sessionEpoch++; sessionInvalid = true; sessionController.abort(); clearAuthToken();
+}
 let onUnauthorized = () => {};
 /** Wire the 401 hook from app.js so api.js stays free of UI imports. */
 export function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
@@ -80,25 +79,42 @@ function extractError(payload) {
 }
 
 /**
- * Low-level request used by `api()` and `apiFormData()`. Parses JSON on the
- * way out and throws an HttpError with the server-provided `error` string
- * when the backend rejects the call.
+ * Cookie-only response/stream helper. All private requests share an abort
+ * signal and fail closed when authorization cannot be established.
  *
  * @param {string} path
  * @param {RequestInit} opts
  */
-async function request(path, opts) {
-  const tok = getAuthToken();
+export async function apiFetch(path, opts = {}) {
+  if (sessionInvalid) throw new HttpError(401, 'Session changed');
+  const epoch = sessionEpoch;
+  clearAuthToken();
   const headers = { ...(opts.headers || {}) };
-  if (tok) headers['Authorization'] = 'Bearer ' + tok;
+  let res;
+  try {
+    res = await fetch(API_BASE + path, {
+      ...opts, headers, signal: sessionController.signal, credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+    });
+  } catch {
+    // A blocked SSO redirect is indistinguishable from network loss. Privacy
+    // wins: hide stale private data instead of treating it as still authorized.
+    if(epoch === sessionEpoch) onUnauthorized();
+    throw new HttpError(401, 'Session unavailable');
+  }
 
-  const res = await fetch(API_BASE + path, { ...opts, headers });
-
-  if (res.status === 401) {
+  if (res.status === 401 || res.status === 403 || res.redirected ||
+      (res.ok && (res.headers.get('Content-Type') || '').includes('text/html'))) {
     onUnauthorized();
     throw new HttpError(401, 'Unauthorized');
   }
 
+  if(epoch !== sessionEpoch) throw new HttpError(401, 'Session changed');
+  return res;
+}
+
+async function request(path, opts) {
+  const epoch = sessionEpoch;
+  const res = await apiFetch(path, opts);
   let payload = null;
   try { payload = await res.json(); } catch { /* empty / non-json — fine */ }
 
@@ -107,6 +123,7 @@ async function request(path, opts) {
     const msg = message || res.statusText || ('HTTP ' + res.status);
     throw new HttpError(res.status, msg, payload, code);
   }
+  if (epoch !== sessionEpoch) throw new HttpError(401, 'Session changed');
   return payload;
 }
 
@@ -121,6 +138,16 @@ export function api(path, method = 'GET', body = null) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body !== null) opts.body = JSON.stringify(body);
   return request(path, opts);
+}
+
+/** Private binary responses also obey session changes during body reads. */
+export async function apiBlob(path) {
+  const epoch = sessionEpoch;
+  const res = await apiFetch(path);
+  if (!res.ok) throw new HttpError(res.status, 'Download failed');
+  const blob = await res.blob();
+  if(epoch !== sessionEpoch) throw new HttpError(401, 'Session changed');
+  return blob;
 }
 
 /** Same as `api()` but for multipart uploads — leaves Content-Type to fetch. */

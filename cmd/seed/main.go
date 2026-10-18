@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 // Command seed populates store/zapcast.db with fake contacts and groups for
@@ -41,7 +41,7 @@ var lastNames = []string{
 	"Costa", "Rodrigues", "Almeida", "Nascimento", "Araújo", "Carvalho",
 	"Gomes", "Martins", "Ribeiro", "Rocha", "Alves", "Monteiro", "Mendes",
 	"Barros", "Freitas", "Barbosa", "Pinto", "Cardoso", "Campos", "Teixeira",
-	"Cavalcanti", "Duarte", "Vieira", "Moreira", "Nunes", "Lopes", "Ramos",
+	"Cavalcanti", "Dias", "Vieira", "Moreira", "Nunes", "Lopes", "Ramos",
 	"Correia", "Andrade", "Azevedo", "Fernandes", "Marques", "Cruz",
 }
 

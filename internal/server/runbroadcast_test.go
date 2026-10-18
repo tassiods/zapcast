@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -163,7 +163,7 @@ func TestRunBroadcastUploadFailureMarksAll(t *testing.T) {
 func TestRunBroadcastSendFailMidway(t *testing.T) {
 	wa := &fakeWA{
 		connected:      true,
-		sendErrAtIndex: map[int]error{1: errBoom},
+		sendErrAtIndex: map[int]error{1: &RejectedDeliveryError{Err: errBoom}},
 	}
 	app := newTestAppWithWA(t, wa)
 	id, _ := app.contacts.CreateBroadcast(ctx, "G", "hi", 3, 0, 0, "", "")

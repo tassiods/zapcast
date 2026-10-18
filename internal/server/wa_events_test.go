@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -192,7 +192,11 @@ func TestHandleWAEventLoggedOutFiresCancelAndEvent(t *testing.T) {
 
 func TestCancelBroadcastNoOpWhenIdle(t *testing.T) {
 	app := newTestApp(t)
-	app.cancelBroadcast("test") // must not panic when no broadcast running
+	func() {
+		if err := app.cancelBroadcast("test"); err != nil {
+			t.Fatal(err)
+		}
+	}() // must not panic when no broadcast running
 }
 
 func TestCancelBroadcastInvokesStoredCancel(t *testing.T) {
@@ -200,7 +204,11 @@ func TestCancelBroadcastInvokesStoredCancel(t *testing.T) {
 	called := false
 	var fakeCancel context.CancelFunc = func() { called = true }
 	app.broadcaster.cancel.Store(&fakeCancel)
-	app.cancelBroadcast("test")
+	func() {
+		if err := app.cancelBroadcast("test"); err != nil {
+			t.Fatal(err)
+		}
+	}()
 	if !called {
 		t.Errorf("stored cancel was not invoked")
 	}

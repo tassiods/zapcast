@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -59,19 +59,30 @@ func parsePagination(r *http.Request) (page, limit int, paginated bool) {
 	if limit > 500 {
 		limit = 500
 	}
+	// Downstream SQL callers calculate (page-1)*limit in int arithmetic.
+	maxPage := int(^uint(0)>>1) / limit
+	if page > maxPage {
+		page = maxPage
+	}
 	return page, limit, true
 }
 
 // paginate slices items and wraps them in a standard envelope.
 func paginate[T any](items []T, page, limit int) map[string]any {
 	total := len(items)
-	start := (page - 1) * limit
-	end := start + limit
-	if start > total {
-		start = total
+	if page < 1 {
+		page = 1
 	}
-	if end > total {
-		end = total
+	if limit < 1 {
+		limit = 50
+	}
+	start, end := total, total
+	// Compare before multiplying, and bound addition by remaining length.
+	if page-1 <= total/limit {
+		start = (page - 1) * limit
+		if limit <= total-start {
+			end = start + limit
+		}
 	}
 	return map[string]any{
 		"items": items[start:end],

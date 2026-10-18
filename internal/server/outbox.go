@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -31,6 +32,9 @@ const (
 // OutboxRow is the persisted shape of one pending retry. media_* fields
 // are zero when the original send was text-only.
 type OutboxRow struct {
+	ExpectedStatus  string // compare-and-swap: review status, or attemptOwnership for RPCs
+	ProviderID      string
+	Payload         []byte
 	ID              int64
 	BroadcastID     int64
 	MessageRowID    int64 // broadcast_messages.id this retry promotes; 0 on legacy rows
@@ -65,14 +69,14 @@ func (s *ContactStore) EnqueueOutbox(ctx context.Context, row OutboxRow) error {
 			media_kind, media_mime, media_name,
 			media_url, media_direct_path, media_key,
 			media_file_sha, media_enc_sha, media_file_len,
-			attempts, last_error, next_attempt_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+			attempts, last_error, next_attempt_at, provider_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
 		row.BroadcastID, msgRowID, row.ContactName, row.Phone, row.Rendered,
 		nullIfEmpty(row.MediaKind), nullIfEmpty(row.MediaMime), nullIfEmpty(row.MediaName),
 		nullIfEmpty(row.MediaURL), nullIfEmpty(row.MediaDirectPath), nullIfBytes(row.MediaKey),
 		nullIfBytes(row.MediaFileSHA), nullIfBytes(row.MediaEncSHA), row.MediaFileLen,
 		nullIfEmpty(row.LastError),
-		row.NextAttemptAt.UTC().Format("2006-01-02 15:04:05"),
+		row.NextAttemptAt.UTC().Format("2006-01-02 15:04:05"), newDeliveryID(),
 	)
 	return err
 }
@@ -86,9 +90,9 @@ func (s *ContactStore) FetchDueOutbox(ctx context.Context, now time.Time) ([]Out
 			COALESCE(media_kind, ''), COALESCE(media_mime, ''), COALESCE(media_name, ''),
 			COALESCE(media_url, ''), COALESCE(media_direct_path, ''),
 			media_key, media_file_sha, media_enc_sha, media_file_len,
-			attempts, COALESCE(last_error, ''), next_attempt_at
+			attempts, COALESCE(last_error, ''), next_attempt_at, payload, COALESCE(provider_id,'')
 		FROM outbox
-		WHERE status = 'pending' AND next_attempt_at <= ?
+		WHERE status = 'pending' AND next_attempt_at <= ? AND broadcast_id IN (SELECT id FROM broadcasts WHERE delivery_state<>'cancelled')
 		ORDER BY next_attempt_at ASC
 		LIMIT 50`,
 		now.UTC().Format("2006-01-02 15:04:05"),
@@ -107,17 +111,29 @@ func (s *ContactStore) FetchDueOutbox(ctx context.Context, now time.Time) ([]Out
 			&r.MediaKind, &r.MediaMime, &r.MediaName,
 			&r.MediaURL, &r.MediaDirectPath,
 			&r.MediaKey, &r.MediaFileSHA, &r.MediaEncSHA, &r.MediaFileLen,
-			&r.Attempts, &r.LastError, &rawNext,
+			&r.Attempts, &r.LastError, &rawNext, &r.Payload, &r.ProviderID,
 		); err != nil {
 			return nil, err
 		}
 		if rawNext.Valid {
-			r.NextAttemptAt, _ = time.Parse("2006-01-02 15:04:05", rawNext.String)
+			// SQLite's DATETIME driver may return RFC3339 rather than the
+			// storage format. Keep the persisted due time for clocked admission.
+			r.NextAttemptAt, err = time.Parse("2006-01-02 15:04:05", rawNext.String)
+			if err != nil {
+				r.NextAttemptAt, err = time.Parse(time.RFC3339Nano, rawNext.String)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
+
+// attemptOwnership accepts cancellation-created uncertainty while excluding
+// pending/requeued rows that are no longer owned by this RPC.
+const attemptOwnership = "attempt"
 
 // MarkOutboxSent removes the row + flips the broadcast_messages row for
 // this attempt to status='sent' with the live message_id. Returns
@@ -130,7 +146,7 @@ func (s *ContactStore) MarkOutboxSent(ctx context.Context, row OutboxRow, messag
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := tx.ExecContext(ctx, "DELETE FROM outbox WHERE id = ?", row.ID)
+	res, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE id=? AND broadcast_id=? AND COALESCE(broadcast_message_id,0)=? AND (?='' OR provider_id=?) AND (?='' OR status=? OR (?=? AND status IN ('inflight','uncertain')))`, row.ID, row.BroadcastID, row.MessageRowID, row.ProviderID, row.ProviderID, row.ExpectedStatus, row.ExpectedStatus, row.ExpectedStatus, attemptOwnership)
 	if err != nil {
 		return err
 	}
@@ -144,8 +160,8 @@ func (s *ContactStore) MarkOutboxSent(ctx context.Context, row OutboxRow, messag
 	// stale "delivered" receipt for an unrelated row isn't overwritten.
 	promote := `
 		UPDATE broadcast_messages
-		SET status = 'sent', message_id = ?, error = NULL, sent_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND status = 'failed'`
+		SET status = CASE WHEN status IN ('delivered','read') THEN status ELSE 'sent' END, message_id = CASE WHEN status IN ('delivered','read') THEN message_id ELSE ? END, error = NULL, sent_at = CASE WHEN status IN ('delivered','read') THEN sent_at ELSE CURRENT_TIMESTAMP END
+		WHERE id = ?`
 	args := []any{messageID, row.MessageRowID}
 	if row.MessageRowID == 0 {
 		promote = `
@@ -170,8 +186,8 @@ func (s *ContactStore) MarkOutboxSent(ctx context.Context, row OutboxRow, messag
 	if n, _ := pres.RowsAffected(); n > 0 {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE broadcasts
-			SET ok_count   = ok_count + 1,
-			    fail_count = CASE WHEN fail_count > 0 THEN fail_count - 1 ELSE 0 END
+			SET ok_count = (SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id AND status IN ('sent','delivered','read')),
+			    fail_count = (SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id AND status IN ('failed','cancelled','uncertain'))
 			WHERE id = ?`, row.BroadcastID); err != nil {
 			return err
 		}
@@ -183,6 +199,15 @@ func (s *ContactStore) MarkOutboxSent(ctx context.Context, row OutboxRow, messag
 // next_attempt_at. When attempts would exceed outboxMaxAttempts the
 // row is marked 'dead' instead so the worker stops touching it.
 func (s *ContactStore) RescheduleOutbox(ctx context.Context, id int64, sendErr string) error {
+	return s.rescheduleOutboxAt(ctx, id, sendErr, time.Now())
+}
+
+func (s *ContactStore) rescheduleOutboxAt(ctx context.Context, id int64, sendErr string, now time.Time) error {
+	return s.rescheduleDeliveryAt(ctx, OutboxRow{ID: id}, sendErr, now)
+}
+
+func (s *ContactStore) rescheduleDeliveryAt(ctx context.Context, row OutboxRow, sendErr string, now time.Time) error {
+	id := row.ID
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -190,7 +215,37 @@ func (s *ContactStore) RescheduleOutbox(ctx context.Context, id int64, sendErr s
 	defer func() { _ = tx.Rollback() }()
 
 	var attempts int
-	if err := tx.QueryRowContext(ctx, "SELECT attempts FROM outbox WHERE id = ?", id).Scan(&attempts); err != nil {
+	var mid int64
+	var campaign, state string
+	if err := tx.QueryRowContext(ctx, `SELECT o.attempts,COALESCE(o.broadcast_message_id,0),b.delivery_state,o.status FROM outbox o JOIN broadcasts b ON b.id=o.broadcast_id WHERE o.id=? AND (?<>? OR (o.broadcast_id=? AND COALESCE(o.broadcast_message_id,0)=? AND (?='' OR o.provider_id=?) AND o.status IN ('inflight','uncertain')))`, id, row.ExpectedStatus, attemptOwnership, row.BroadcastID, row.MessageRowID, row.ProviderID, row.ProviderID).Scan(&attempts, &mid, &campaign, &state); err != nil {
+		return err
+	}
+	var confirmed int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM broadcast_messages WHERE id=? AND status IN ('sent','delivered','read')`, mid).Scan(&confirmed); err != nil {
+		return err
+	}
+	if confirmed > 0 {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE id=?`, id); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE broadcasts SET ok_count=(SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id AND status IN ('sent','delivered','read')),fail_count=(SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id AND status IN ('failed','cancelled','uncertain')) WHERE id=(SELECT broadcast_id FROM broadcast_messages WHERE id=?)`, mid); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if campaign == "cancelled" {
+		if _, err = tx.ExecContext(ctx, `UPDATE outbox SET status='cancelled',last_error=? WHERE id=?`, sendErr, id); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE broadcast_messages SET status='cancelled',error=? WHERE id=? AND status NOT IN ('sent','delivered','read')`, sendErr, mid); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if state != "pending" && state != "inflight" {
+		return ErrOutboxMissing
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE broadcast_messages SET status='failed',error=? WHERE id=? AND status NOT IN ('delivered','read')`, sendErr, mid); err != nil {
 		return err
 	}
 	attempts++
@@ -209,10 +264,10 @@ func (s *ContactStore) RescheduleOutbox(ctx context.Context, id int64, sendErr s
 	if backoff > time.Hour {
 		backoff = time.Hour
 	}
-	next := time.Now().Add(backoff)
+	next := now.Add(backoff)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE outbox
-		SET attempts = ?, last_error = ?, next_attempt_at = ?
+		SET status = 'pending', attempts = ?, last_error = ?, next_attempt_at = ?
 		WHERE id = ?`,
 		attempts, sendErr, next.UTC().Format("2006-01-02 15:04:05"), id,
 	); err != nil {
@@ -237,6 +292,12 @@ func nullIfBytes(b []byte) any {
 // rows return a plain Conversation; media rows reuse the original
 // UploadResponse fields the original send already captured.
 func composeOutboxMessage(r OutboxRow) *waProto.Message {
+	if len(r.Payload) > 0 {
+		var msg waProto.Message
+		if proto.Unmarshal(r.Payload, &msg) == nil {
+			return &msg
+		}
+	}
 	if r.MediaKind == "" {
 		return &waProto.Message{Conversation: proto.String(r.Rendered)}
 	}
@@ -254,9 +315,12 @@ func composeOutboxMessage(r OutboxRow) *waProto.Message {
 // OutboxWorker runs the retry loop. Started by Run() and torn down via
 // the App shutdown ctx.
 type OutboxWorker struct {
-	app    *App
-	logger *slog.Logger
-	wg     sync.WaitGroup
+	now            func() time.Time // deterministic admission/backoff clock; nil uses wall time
+	batchTimeout   time.Duration
+	attemptTimeout time.Duration
+	app            *App
+	logger         *slog.Logger
+	wg             sync.WaitGroup
 }
 
 // StartOutboxWorker spawns the worker goroutine and returns the handle.
@@ -289,16 +353,55 @@ func (w *OutboxWorker) loop() {
 	}
 }
 
+func (w *OutboxWorker) currentTime() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
 func (w *OutboxWorker) processOnce() {
 	client := w.app.WA()
 	if client == nil || !client.IsConnected() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(w.app.shutdownCtx, 30*time.Second)
-	defer cancel()
+	preparing, perr := w.app.contacts.db.QueryContext(w.app.shutdownCtx, `SELECT id FROM broadcasts WHERE delivery_state='interrupted' AND media_data IS NOT NULL ORDER BY id LIMIT 50`)
+	if perr != nil {
+		w.logger.Warn("fetch media recovery", "err", perr)
+		return
+	}
+	var ids []int64
+	for preparing.Next() {
+		var id int64
+		if err := preparing.Scan(&id); err != nil {
+			preparing.Close()
+			return
+		}
+		ids = append(ids, id)
+	}
+	perr = preparing.Err()
+	preparing.Close()
+	if perr != nil {
+		return
+	}
+	for _, id := range ids {
+		// A recovery upload owns the same byte admission as HTTP parsing. Never
+		// load a persisted media buffer concurrently with an admitted request.
+		if !w.app.broadcaster.mu.TryLock() {
+			break
+		}
+		func() {
+			defer w.app.broadcaster.mu.Unlock()
+			if err := w.app.prepareDelivery(w.app.shutdownCtx, id, client); err != nil {
+				w.logger.Warn("recover media upload", "err", err, "broadcast_id", id)
+			}
+		}()
+	}
 
-	due, err := w.app.contacts.FetchDueOutbox(ctx, time.Now())
+	fetchCtx, fetchCancel := context.WithTimeout(w.app.shutdownCtx, 5*time.Second)
+	due, err := w.app.contacts.FetchDueOutbox(fetchCtx, w.currentTime())
+	fetchCancel()
 	if err != nil {
 		w.logger.Warn("fetch due outbox", "err", err)
 		return
@@ -307,9 +410,15 @@ func (w *OutboxWorker) processOnce() {
 		return
 	}
 	w.logger.Info("outbox tick", "due", len(due))
+	budget := w.batchTimeout
+	if budget <= 0 {
+		budget = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(w.app.shutdownCtx, budget)
+	defer cancel()
 
 	for _, row := range due {
-		if w.app.shutdownCtx.Err() != nil {
+		if w.app.shutdownCtx.Err() != nil || ctx.Err() != nil {
 			return
 		}
 		w.attempt(ctx, client, row)
@@ -317,12 +426,100 @@ func (w *OutboxWorker) processOnce() {
 }
 
 func (w *OutboxWorker) attempt(ctx context.Context, client WAClient, row OutboxRow) {
+	if ctx.Err() != nil {
+		return
+	}
+	attemptCtx, attemptCancel := context.WithCancel(ctx)
+	defer attemptCancel()
+	ctx = attemptCtx
+	for {
+		delay := computeBroadcastDelay(w.app.broadcaster.delay, w.app.broadcaster.jitter, rand.Float64)
+		b := w.app.broadcaster
+		b.attemptMu.Lock()
+		claimed, wait, err := w.app.contacts.claimDeliveryAt(ctx, row, w.currentTime(), delay, b.hourlyCap)
+		if claimed {
+			if b.attempts == nil {
+				b.attempts = make(map[int64]deliveryAttempt)
+			}
+			b.attempts[row.ID] = deliveryAttempt{broadcastID: row.BroadcastID, cancel: attemptCancel}
+		}
+		b.attemptMu.Unlock()
+		if err != nil {
+			w.logger.Warn("delivery admission failed", "err", err)
+			return
+		}
+		if claimed {
+			break
+		}
+		if wait <= 0 {
+			return
+		}
+		reason := "cadence"
+		if wait > time.Minute {
+			reason = "hourly_cap"
+		}
+		w.app.broadcastEvent(Event{Type: "broadcast_paused", Data: BroadcastPausedData{BroadcastID: row.BroadcastID, Reason: reason, ResumeAt: time.Now().Add(wait).Format(time.RFC3339), WaitSeconds: int(wait.Seconds())}})
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+	defer func() {
+		b := w.app.broadcaster
+		b.attemptMu.Lock()
+		delete(b.attempts, row.ID)
+		b.attemptMu.Unlock()
+		pctx, cancel := persistContext()
+		defer cancel()
+		_ = w.app.contacts.reconcileDelivery(pctx, row.BroadcastID)
+	}()
+	row.ExpectedStatus = attemptOwnership
 	jid := types.NewJID(row.Phone, types.DefaultUserServer)
+	if len(row.Payload) > 0 {
+		var stored waProto.Message
+		if err := proto.Unmarshal(row.Payload, &stored); err != nil {
+			pctx, cancel := persistContext()
+			defer cancel()
+			if e := w.app.contacts.uncertainDelivery(pctx, row, "stored payload corrupt: "+err.Error()); e != nil {
+				w.logger.Error("record corrupt intent", "err", e)
+			}
+			return
+		}
+	}
 	msg := composeOutboxMessage(row)
 
-	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
-	resp, err := client.SendMessage(sendCtx, jid, msg)
+	timeout := w.attemptTimeout
+	if timeout <= 0 {
+		timeout = sendTimeout
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, timeout)
+	var resp whatsmeow.SendResponse
+	var err error
+	if sendCtx.Err() != nil {
+		cancel()
+		pctx, pcancel := persistContext()
+		defer pcancel()
+		_ = w.app.contacts.uncertainDelivery(pctx, row, sendCtx.Err().Error())
+		return
+	}
+	if stable, ok := client.(stableWAClient); ok {
+		if row.ProviderID == "" {
+			_ = w.app.contacts.db.QueryRowContext(ctx, `SELECT provider_id FROM outbox WHERE id=?`, row.ID).Scan(&row.ProviderID)
+		}
+		resp, err = stable.SendMessageWithID(sendCtx, jid, msg, row.ProviderID)
+	} else {
+		resp, err = client.SendMessage(sendCtx, jid, msg)
+	}
 	cancel()
+	// Count provider outcomes, independently of the durable commit/review state.
+	if err != nil {
+		metricBroadcastMessagesErr.Add(1)
+	} else {
+		metricBroadcastMessagesOK.Add(1)
+	}
 
 	// Detached ctx for the post-send bookkeeping: ctx derives from
 	// shutdownCtx, and a SIGTERM landing between a successful send and
@@ -332,11 +529,18 @@ func (w *OutboxWorker) attempt(ctx context.Context, client WAClient, row OutboxR
 	defer pcancel()
 
 	if err != nil {
+		var rejected *RejectedDeliveryError
+		if !errors.As(err, &rejected) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if e := w.app.contacts.uncertainDelivery(pctx, row, err.Error()); e != nil {
+				w.logger.Error("retain inflight for recovery; uncertain write failed", "err", e, "outbox_id", row.ID)
+			}
+			return
+		}
 		w.logger.Warn("outbox retry failed",
 			"err", err, "outbox_id", row.ID,
 			"phone", maskPhone(row.Phone), "attempts", row.Attempts+1,
 		)
-		if rerr := w.app.contacts.RescheduleOutbox(pctx, row.ID, err.Error()); rerr != nil {
+		if rerr := w.app.contacts.rescheduleDeliveryAt(pctx, row, err.Error(), w.currentTime()); rerr != nil {
 			w.logger.Warn("reschedule failed", "err", rerr, "outbox_id", row.ID)
 		}
 		metricOutboxRetries.Add(1)
@@ -345,6 +549,9 @@ func (w *OutboxWorker) attempt(ctx context.Context, client WAClient, row OutboxR
 
 	if err := w.app.contacts.MarkOutboxSent(pctx, row, resp.ID); err != nil {
 		w.logger.Warn("mark sent failed", "err", err, "outbox_id", row.ID)
+		if e := w.app.contacts.uncertainDelivery(pctx, row, "remote success; local commit failed: "+err.Error()); e != nil {
+			w.logger.Error("retain inflight for startup reconciliation", "err", e)
+		}
 		return
 	}
 	w.logger.Info("outbox retry succeeded",

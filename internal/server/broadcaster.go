@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -17,6 +17,10 @@ import (
 // Broadcaster keeps the bookkeeping for the at-most-one broadcast goroutine
 // the service runs at a time.
 type Broadcaster struct {
+	attemptMu sync.Mutex // orders durable admission/registration against cancellation
+	attempts  map[int64]deliveryAttempt
+	currentID atomic.Int64
+	prepareMu sync.Mutex // serializes media preparation/recovery
 	logger    *slog.Logger
 	delay     time.Duration
 	jitter    float64
@@ -98,6 +102,7 @@ type StartHandle struct {
 func (h *StartHandle) Done() {
 	h.once.Do(func() {
 		h.b.cancel.Store(nil)
+		h.b.currentID.Store(0)
 		h.b.mu.Unlock()
 		h.b.wg.Done()
 	})
@@ -108,6 +113,7 @@ func (h *StartHandle) Abandon() {
 	h.once.Do(func() {
 		h.Cancel()
 		h.b.cancel.Store(nil)
+		h.b.currentID.Store(0)
 		h.b.mu.Unlock()
 		h.b.wg.Done()
 	})
@@ -152,4 +158,18 @@ func (b *Broadcaster) Close() {
 	b.lifeMu.Lock()
 	b.closing = true
 	b.lifeMu.Unlock()
+}
+
+type deliveryAttempt struct {
+	broadcastID int64
+	cancel      context.CancelFunc
+}
+
+// Caller holds attemptMu across the durable cancellation commit.
+func (b *Broadcaster) cancelAttemptsLocked(id int64) {
+	for _, a := range b.attempts {
+		if id == 0 || id == a.broadcastID {
+			a.cancel()
+		}
+	}
 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -11,14 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
-	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -57,12 +55,6 @@ const uploadTimeout = 60 * time.Second
 // well under a second; 30s is enough that legitimate retries succeed.
 const sendTimeout = 30 * time.Second
 
-// windowPersistEvery batches the rolling-window UPDATEs. One write per
-// message would serialise every API read behind the broadcast on the
-// single-connection pool; a crash loses at most the last few increments,
-// which only under-counts the resumed window.
-const windowPersistEvery = 25
-
 // mediaPayload captures the attachment fields a broadcast carries through
 // validation into the goroutine.
 type mediaPayload struct {
@@ -84,21 +76,6 @@ func (app *App) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, media, ok := app.parseBroadcastRequest(w, r)
-	if !ok {
-		return
-	}
-	if body.Message == "" {
-		jsonErrorLocalized(w, r, http.StatusBadRequest, "err_message_required")
-		return
-	}
-
-	adhoc := len(body.Phones) > 0
-	if !adhoc && body.GroupID == "" {
-		jsonErrorLocalized(w, r, http.StatusBadRequest, "err_group_or_phones")
-		return
-	}
-
 	// Detached parent context — the send must survive HTTP request close
 	// but must be cancellable from WhatsApp disconnect and SIGTERM.
 	handle, err := app.broadcaster.Start(context.Background(), broadcastCooldown)
@@ -113,6 +90,28 @@ func (app *App) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleError(w, r, http.StatusInternalServerError, err)
+		return
+	}
+
+	launched := false
+	defer func() {
+		if !launched {
+			handle.Abandon()
+		}
+	}()
+
+	body, media, ok := app.parseBroadcastRequest(w, r)
+	if !ok {
+		return
+	}
+	if body.Message == "" {
+		jsonErrorLocalized(w, r, http.StatusBadRequest, "err_message_required")
+		return
+	}
+
+	adhoc := len(body.Phones) > 0
+	if !adhoc && body.GroupID == "" {
+		jsonErrorLocalized(w, r, http.StatusBadRequest, "err_group_or_phones")
 		return
 	}
 
@@ -137,14 +136,16 @@ func (app *App) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 		templateVars = make(map[string]string)
 	}
 
-	broadcastID, hErr := app.contacts.CreateBroadcast(r.Context(), label, body.Message, len(contacts), 0, 0, media.kind, media.name)
+	broadcastID, hErr := app.contacts.createDelivery(r.Context(), 0, label, body.Message, contacts, templateVars, media)
 	if hErr != nil {
 		handle.Abandon()
 		handleError(w, r, http.StatusInternalServerError, hErr)
 		return
 	}
 
+	app.broadcaster.currentID.Store(broadcastID)
 	metricBroadcastsTotal.Add(1)
+	launched = true
 	go app.runBroadcast(handle, broadcastID, label, body.Message, contacts, templateVars, media)
 
 	jsonResponse(w, http.StatusAccepted, BroadcastStartedResponse{
@@ -161,7 +162,10 @@ func (app *App) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 // error, so the button stays safe to press on a stale progress panel.
 func (app *App) handleBroadcastCancel(w http.ResponseWriter, r *http.Request) {
 	running := app.broadcaster.Running()
-	app.cancelBroadcast("operator")
+	if err := app.cancelBroadcast("operator"); err != nil {
+		handleError(w, r, 500, err)
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]bool{"cancelled": running})
 }
 
@@ -184,6 +188,11 @@ func (app *App) parseBroadcastRequest(w http.ResponseWriter, r *http.Request) (B
 		return body, media, false
 	}
 
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			app.logger.Warn("multipart cleanup failed", "err", err)
+		}
+	}()
 	body.Message = strings.TrimSpace(r.FormValue("message"))
 	body.GroupID = strings.TrimSpace(r.FormValue("groupId"))
 	if raw := r.FormValue("phones"); raw != "" {
@@ -273,15 +282,26 @@ func (app *App) runBroadcast(handle *StartHandle, broadcastID int64, label, mess
 		handle.Done()
 	}()
 
+	app.broadcaster.currentID.Store(broadcastID)
 	ctx := handle.Ctx
 	client := app.WA()
 
+	pctx0, cancel0 := persistContext()
+	_, intentErr := app.contacts.createDelivery(pctx0, broadcastID, label, message, contacts, templateVars, media)
+	cancel0()
+	if intentErr != nil {
+		app.logger.Error("persist delivery", "err", intentErr)
+		return
+	}
 	uploadResp, ok := app.uploadIfMedia(ctx, client, broadcastID, contacts, label, media)
 	if !ok {
 		return
 	}
 
 	okCount, failCount, abortedCount, aborted := app.sendAll(ctx, client, broadcastID, label, message, contacts, templateVars, media, uploadResp)
+	if aborted {
+		metricBroadcastAborts.Add(1)
+	}
 
 	// Detached ctx: on the abort path the broadcast ctx is already
 	// cancelled, but the final counters still describe what happened.
@@ -289,6 +309,9 @@ func (app *App) runBroadcast(handle *StartHandle, broadcastID int64, label, mess
 	defer pcancel()
 	if err := app.contacts.UpdateBroadcastCounts(pctx, broadcastID, okCount, failCount); err != nil {
 		app.logger.Warn("failed to update broadcast counts", "err", err, "broadcast_id", broadcastID)
+	}
+	if err := app.contacts.db.QueryRowContext(pctx, `SELECT ok_count,fail_count FROM broadcasts WHERE id=?`, broadcastID).Scan(&okCount, &failCount); err != nil {
+		app.logger.Warn("read reconciled completion counts", "err", err)
 	}
 	app.broadcastEvent(buildBroadcastDoneEvent(broadcastID, label, len(contacts), okCount, failCount, abortedCount, aborted, ""))
 }
@@ -299,11 +322,8 @@ func (app *App) uploadIfMedia(ctx context.Context, client WAClient, broadcastID 
 		return whatsmeow.UploadResponse{}, true
 	}
 
-	mediaType, _, _ := classifyMedia(media.mime)
-	upCtx, upCancel := context.WithTimeout(ctx, uploadTimeout)
-	defer upCancel()
-
-	resp, err := client.Upload(upCtx, media.data, mediaType)
+	err := app.prepareDelivery(ctx, broadcastID, client)
+	resp := whatsmeow.UploadResponse{}
 	if err != nil {
 		app.logger.Error("media upload failed", "broadcast_id", broadcastID, "err", err)
 		errMsg := "upload_failed: " + err.Error()
@@ -311,9 +331,26 @@ func (app *App) uploadIfMedia(ctx context.Context, client WAClient, broadcastID 
 		// was cancelled, and these rows must still record the outcome.
 		pctx, pcancel := persistContext()
 		defer pcancel()
-		for _, c := range contacts {
-			if _, perr := app.contacts.InsertBroadcastMessage(pctx, broadcastID, c.Name, c.Phone, "", "failed", errMsg); perr != nil {
-				app.logger.Warn("failed to persist upload-failed message", "err", perr, "broadcast_id", broadcastID)
+		if app.shutdownCtx != nil && app.shutdownCtx.Err() != nil {
+			_, _ = app.contacts.db.ExecContext(pctx, `UPDATE broadcasts SET delivery_state='interrupted' WHERE id=? AND delivery_state<>'cancelled'`, broadcastID)
+		} else if ctx.Err() != nil {
+			if e := app.contacts.cancelDelivery(pctx, broadcastID, "upload cancelled"); e != nil {
+				app.logger.Error("cancel upload delivery", "err", e)
+			}
+		} else {
+			tx, e := app.contacts.db.BeginTx(pctx, nil)
+			if e == nil {
+				_, e = tx.ExecContext(pctx, `UPDATE broadcast_messages SET status='failed',error=? WHERE broadcast_id=? AND status='pending'`, errMsg, broadcastID)
+				if e == nil {
+					_, e = tx.ExecContext(pctx, `UPDATE outbox SET status='dead',last_error=? WHERE broadcast_id=? AND status='preparing'`, errMsg, broadcastID)
+				}
+				if e == nil {
+					e = tx.Commit()
+				}
+				_ = tx.Rollback()
+			}
+			if e != nil {
+				app.logger.Error("record upload failure", "err", e)
 			}
 		}
 		_ = app.contacts.UpdateBroadcastCounts(pctx, broadcastID, 0, len(contacts))
@@ -327,177 +364,43 @@ func (app *App) uploadIfMedia(ctx context.Context, client WAClient, broadcastID 
 // sendAll loops through recipients, enforcing the hourly cap and aborting
 // on cancellation.
 func (app *App) sendAll(ctx context.Context, client WAClient, broadcastID int64, label, message string, contacts []Contact, templateVars map[string]string, media mediaPayload, uploadResp whatsmeow.UploadResponse) (okCount, failCount, abortedCount int, aborted bool) {
-	// Rolling-hour cap state. The row is persisted per batch so that (a) the
-	// running goroutine's own cap accounting survives across pause/resume
-	// within this process, and (b) its lingering presence at the next boot
-	// flags this broadcast as interrupted (see TakeInterruptedBroadcasts).
-	// Note: broadcasts are NOT resumed across a restart — a killed goroutine
-	// leaves the unsent remainder lost. LoadBroadcastWindow returns a
-	// zero-value window (windowStart = now, sentInWindow = 0) when no row
-	// exists yet.
-	win, werr := app.contacts.LoadBroadcastWindow(ctx, broadcastID)
-	if werr != nil {
-		app.logger.Warn("failed to load broadcast window — starting fresh", "err", werr, "broadcast_id", broadcastID)
-		win = BroadcastWindow{BroadcastID: broadcastID, WindowStart: time.Now().UTC()}
+	rows, err := app.contacts.deliveryRows(context.Background(), broadcastID)
+	if err != nil {
+		return 0, len(contacts), 0, false
 	}
-	windowStart := win.WindowStart
-	sentInWindow := win.SentInWindow
+	w := &OutboxWorker{app: app, logger: app.logger}
 
-	saveWindow := func() {
-		pctx, pcancel := persistContext()
-		defer pcancel()
-		err := app.contacts.SaveBroadcastWindow(pctx, BroadcastWindow{
-			BroadcastID:  broadcastID,
-			WindowStart:  windowStart,
-			SentInWindow: sentInWindow,
-		})
-		if err != nil {
-			app.logger.Warn("failed to persist broadcast window", "err", err, "broadcast_id", broadcastID)
-		}
-	}
-
-	defer func() {
-		// Drop the window row once the broadcast is finished — there's no
-		// point keeping per-broadcast state for a row that won't be
-		// resumed. Best-effort; an orphan row gets cleaned via FK CASCADE
-		// when the parent broadcast is eventually deleted. Detached ctx —
-		// this defer also runs on the abort path where ctx is cancelled.
-		pctx, pcancel := persistContext()
-		defer pcancel()
-		if err := app.contacts.ClearBroadcastWindow(pctx, broadcastID); err != nil {
-			app.logger.Debug("failed to clear broadcast window", "err", err, "broadcast_id", broadcastID)
-		}
-	}()
-
-	// recordAborted books contacts[from:] as aborted on a detached ctx (the
-	// broadcast ctx is cancelled by definition here, so its inserts would all
-	// fail immediately and the history would lose the aborted remainder).
-	recordAborted := func(from int) {
-		aborted = true
-		abortedCount = len(contacts) - from
-		metricBroadcastAborts.Add(1)
-		pctx, pcancel := persistContext()
-		defer pcancel()
-		for _, rest := range contacts[from:] {
-			if _, err := app.contacts.InsertBroadcastMessage(pctx, broadcastID, rest.Name, rest.Phone, "", "failed", "aborted"); err != nil {
-				app.logger.Warn("failed to persist aborted broadcast message", "err", err, "broadcast_id", broadcastID)
-			}
-			failCount++
-		}
-	}
-
-	for i, c := range contacts {
+	for i, row := range rows {
 		if ctx.Err() != nil {
-			recordAborted(i)
+			aborted = true
+			abortedCount = len(rows) - i
+			pctx, cancel := persistContext()
+			if app.shutdownCtx != nil && app.shutdownCtx.Err() != nil {
+				_, _ = app.contacts.db.ExecContext(pctx, `UPDATE broadcasts SET delivery_state='interrupted' WHERE id=? AND delivery_state<>'cancelled'`, broadcastID)
+				cancel()
+				break
+			}
+			_ = app.contacts.cancelDelivery(pctx, broadcastID, "aborted")
+			_, _ = app.contacts.db.ExecContext(pctx, `UPDATE broadcast_messages SET status='cancelled',error='aborted' WHERE broadcast_id=? AND status='pending'`, broadcastID)
+			_, _ = app.contacts.db.ExecContext(pctx, `UPDATE outbox SET status='cancelled' WHERE broadcast_id=? AND status='pending'`, broadcastID)
+			cancel()
+			failCount += abortedCount
 			break
 		}
 
-		if app.broadcaster.hourlyCap > 0 && sentInWindow >= app.broadcaster.hourlyCap {
-			windowStart, sentInWindow = app.pauseForHourlyCap(ctx, broadcastID, windowStart)
-			saveWindow()
-			// A cancel during the (possibly hour-long) pause must abort here
-			// rather than fall through into a doomed SendMessage that would be
-			// recorded as "failed" and needlessly enqueued for retry.
-			if ctx.Err() != nil {
-				recordAborted(i)
-				break
-			}
-		}
-
-		rendered := renderTemplate(message, c, templateVars)
-		jid := types.NewJID(c.Phone, types.DefaultUserServer)
-		msg := composeMessage(rendered, media, uploadResp)
-
-		sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
-		sendResp, err := client.SendMessage(sendCtx, jid, msg)
-		cancel()
-
-		// The send already happened (or definitively failed) — its history
-		// row and retry enqueue must not be dropped by a cancellation that
-		// races in between.
-		pctx, pcancel := persistContext()
-
-		var status, errMsg, messageID string
-		if err != nil {
-			failCount++
-			status = "failed"
-			errMsg = err.Error()
-			metricBroadcastMessagesErr.Add(1)
-			app.logger.Warn("broadcast message failed", "broadcast_id", broadcastID, "contact", maskPhone(c.Phone), "err", err)
-		} else {
+		w.attempt(ctx, client, row)
+		var status string
+		_ = app.contacts.db.QueryRowContext(context.Background(), `SELECT status FROM broadcast_messages WHERE id=?`, row.MessageRowID).Scan(&status)
+		success := status == "sent" || status == "delivered" || status == "read"
+		if success {
 			okCount++
-			status = "sent"
-			messageID = sendResp.ID
-			metricBroadcastMessagesOK.Add(1)
-			app.logger.Info("broadcast message sent", "broadcast_id", broadcastID, "contact", maskPhone(c.Phone), "message_id", sendResp.ID)
+		} else {
+			failCount++
 		}
+		app.broadcastEvent(Event{Type: "broadcast_progress", Data: BroadcastProgressData{BroadcastID: broadcastID, Current: i + 1, Total: len(rows), OK: okCount, Fail: failCount, Contact: row.ContactName, Success: success}})
 
-		// History row first — the outbox enqueue below references its id so
-		// the retry promotes exactly this row, not a phone-matched guess.
-		msgRowID, perr := app.contacts.InsertBroadcastMessage(pctx, broadcastID, c.Name, c.Phone, messageID, status, errMsg)
-		if perr != nil {
-			app.logger.Warn("failed to persist broadcast message", "err", perr, "broadcast_id", broadcastID)
-		}
-
-		if err != nil {
-			// Enqueue for retry. We capture the rendered body (template
-			// already substituted) + the shared UploadResponse fields so
-			// the outbox worker can resend without rebuilding either.
-			row := OutboxRow{
-				BroadcastID:  broadcastID,
-				MessageRowID: msgRowID,
-				ContactName:  c.Name,
-				Phone:        c.Phone,
-				Rendered:     rendered,
-				LastError:    errMsg,
-			}
-			if media.present() {
-				row.MediaKind = media.kind
-				row.MediaMime = media.mime
-				row.MediaName = media.name
-				row.MediaURL = uploadResp.URL
-				row.MediaDirectPath = uploadResp.DirectPath
-				row.MediaKey = uploadResp.MediaKey
-				row.MediaFileSHA = uploadResp.FileSHA256
-				row.MediaEncSHA = uploadResp.FileEncSHA256
-				row.MediaFileLen = uploadResp.FileLength
-			}
-			if qerr := app.contacts.EnqueueOutbox(pctx, row); qerr != nil {
-				app.logger.Warn("enqueue outbox failed", "err", qerr, "broadcast_id", broadcastID)
-			}
-		}
-		pcancel()
-
-		app.broadcastEvent(Event{
-			Type: "broadcast_progress",
-			Data: BroadcastProgressData{
-				BroadcastID: broadcastID,
-				Current:     i + 1,
-				Total:       len(contacts),
-				OK:          okCount,
-				Fail:        failCount,
-				Contact:     c.Name,
-				Success:     err == nil,
-			},
-		})
-
-		sentInWindow++
-		if sentInWindow%windowPersistEvery == 0 {
-			saveWindow()
-		}
-
-		// Per-message pacing. Timer (not time.After) so cancellation frees
-		// it immediately instead of leaking it until the delay elapses.
-		delay := computeBroadcastDelay(app.broadcaster.delay, app.broadcaster.jitter, rand.Float64)
-		timer := time.NewTimer(delay)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			// loop's ctx check on the next iteration finishes out cleanly.
-			timer.Stop()
-		}
 	}
-	return okCount, failCount, abortedCount, aborted
+	return
 }
 
 // persistContext returns a short-lived context detached from the broadcast's
@@ -516,35 +419,6 @@ func composeMessage(rendered string, media mediaPayload, uploadResp whatsmeow.Up
 		return &waProto.Message{Conversation: proto.String(rendered)}
 	}
 	return buildMediaMessage(rendered, media.kind, uploadResp, media.mime, media.name)
-}
-
-// pauseForHourlyCap sleeps until the rolling-hour window resets.
-func (app *App) pauseForHourlyCap(ctx context.Context, broadcastID int64, windowStart time.Time) (time.Time, int) {
-	wait := time.Hour - time.Since(windowStart)
-	if wait > 0 {
-		resumeAt := time.Now().Add(wait)
-		app.logger.Warn("broadcast hit hourly cap, pausing",
-			"broadcast_id", broadcastID, "cap", app.broadcaster.hourlyCap,
-			"resume_at", resumeAt.Format(time.RFC3339))
-		app.broadcastEvent(Event{
-			Type: "broadcast_paused",
-			Data: BroadcastPausedData{
-				BroadcastID: broadcastID,
-				Reason:      "hourly_cap",
-				ResumeAt:    resumeAt.Format(time.RFC3339),
-				WaitSeconds: int(wait.Seconds()),
-			},
-		})
-		// Timer instead of time.After — this wait can be most of an hour,
-		// and an abort mid-pause must not leave the timer pinned in memory.
-		timer := time.NewTimer(wait)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-		}
-	}
-	return time.Now().UTC(), 0
 }
 
 // maskPhone hides the middle digits of a phone number for log output,

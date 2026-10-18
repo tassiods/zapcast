@@ -3,6 +3,13 @@
 // page renders, nav links route to other pages, console stays clean.
 
 import { test, expect } from '@playwright/test';
+test.beforeEach(async ({page}) => {
+  await page.goto('/');
+  await page.fill('#authInput','synthetic-test-token');
+  await page.click('#authSubmit');
+  await expect(page.locator('#authBackdrop')).not.toHaveClass(/open/);
+  await expect(page.locator('#versionChip')).not.toHaveText('v…');
+});
 
 test('boots without console errors', async ({ page }) => {
   const errors = [];
@@ -41,8 +48,8 @@ test('translations endpoint replies 304 on a second GET', async ({ request }) =>
   expect(second.status()).toBe(304);
 });
 
-test('structured error envelope on missing resource', async ({ request }) => {
-  const res = await request.delete('/api/contacts/zzz');
+test('structured error envelope on missing resource', async ({ page }) => {
+  const res = await page.context().request.delete('/api/contacts/zzz');
   expect(res.status()).toBe(404);
   const body = await res.json();
   expect(body.error?.code).toBe('err_contact_not_found');

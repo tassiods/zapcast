@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -29,6 +29,8 @@ type loggingResponseWriter struct {
 	bytes  int
 }
 
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *loggingResponseWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
@@ -42,9 +44,11 @@ func (w *loggingResponseWriter) Write(b []byte) (int, error) {
 
 // Flush exposes the underlying flusher so SSE handlers keep working.
 func (w *loggingResponseWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	_ = w.FlushError()
+}
+
+func (w *loggingResponseWriter) FlushError() error {
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 // accessLogMiddleware logs method/path/status/duration after each request.
@@ -102,12 +106,11 @@ func httpStatusClass(status int) string {
 }
 
 // routeLabel returns the registered mux pattern for the current request
-// (Go 1.22+ ServeMux exposes it via r.Pattern). Falls back to the cleaned
-// path so unrouted requests still produce a bounded label set instead of
-// per-id explosion.
+// (Go 1.22+ ServeMux exposes it via r.Pattern). Requests rejected before
+// routing share one unknown bucket; never retain client-controlled paths.
 func routeLabel(r *http.Request) string {
 	if r.Pattern != "" {
 		return r.Pattern
 	}
-	return r.URL.Path
+	return "unknown"
 }

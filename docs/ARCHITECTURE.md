@@ -1,45 +1,40 @@
-# ZapCast architecture notes
+# ZapCast — Architecture Notes
 
-Short reference for contributors and agents. The full public overview lives in `README.md`; this file focuses on code contracts that are easy to miss.
+Short reference for contributors. Covers the contracts that are easy to
+miss from reading code in isolation.
 
 ## Package layout
 
-```text
-.
-├── main.go                     # thin entry; calls server.Run()
-├── cmd/seed/                   # fixture seeder through ContactStore
-├── e2e/                        # Playwright browser smoke tests
-└── internal/server/            # HTTP service, storage, web assets
-    ├── server.go               # App struct, Run(), route registration, shutdown
-    ├── auth.go + session.go    # WhatsApp status/QR/logout and browser sessions
-    ├── errors.go               # APIError envelope + LocalizedError contract
-    ├── middleware.go           # request ID, CORS, auth, security headers
-    ├── access_log.go           # structured request log + per-route metrics
-    ├── health.go               # /healthz, /readyz
-    ├── metrics.go              # /debug/vars expvar counters
-    ├── handlers_*.go           # per-area HTTP handlers
-    ├── contacts.go             # ContactStore and SQLite-backed persistence APIs
-    ├── migrations.go           # schema_migrations runner
-    ├── migrations/             # embedded .sql migrations
-    ├── broadcast.go            # /api/broadcast handler and send loop
-    ├── broadcaster.go          # in-flight slot, cancel and cooldown lifecycle
-    ├── outbox.go               # retry worker and dead-letter rows
-    ├── sse.go + sse_events.go  # SSE hub and typed payloads
-    ├── wa_events.go            # whatsmeow → app bridge
-    ├── waclient.go             # WhatsApp adapter interface for tests
-    ├── i18n*.go                # translation tables + ETag cache
-    └── web/                    # SPA source; Vite writes dist/ for prod builds
 ```
-
-## Build modes
-
-- Default Go builds embed `internal/server/web/` directly. This is convenient for development and includes source/test files in the embedded filesystem.
-- Production builds must run `npm run build` first, then `go build -tags prod`; `embed_prod.go` serves only `internal/server/web/dist/`.
-- Release workflow binaries inject the tag through `-ldflags "-X zapcast/internal/server.versionLdflag=<tag>"`.
+.
+├── main.go                     # thin entry — calls server.Run()
+├── cmd/seed/                   # CLI for fixture data, goes through ContactStore
+└── internal/server/            # the entire HTTP service
+    ├── server.go               # App struct + Run() boot
+    ├── errors.go               # APIError envelope + LocalizedError contract
+    ├── middleware.go           # requestID, CORS, auth, ETag, security headers
+    ├── access_log.go           # structured request log + per-route metric
+    ├── sse.go + sse_events.go  # hub + typed event payloads + Origin gate
+    ├── broadcaster.go          # mutex/cancel/WG lifecycle (StartHandle)
+    ├── broadcast.go            # /api/broadcast handler + worker
+    ├── auth.go                 # status, QR pairing, logout, Version()
+    ├── wa_events.go            # whatsmeow → app bridge (shutdown-aware ctx)
+    ├── health.go               # /healthz, /readyz
+    ├── metrics.go              # expvar counters
+    ├── handlers_*.go           # per-area HTTP handlers
+    ├── csv_*.go + media.go     # CSV + multipart wrappers
+    ├── contacts.go             # ContactStore (all methods ctx-aware)
+    ├── migrations.go           # schema_migrations + runner
+    ├── migrations/             # embedded .sql migrations
+    ├── i18n*.go                # translation tables + ETag cache
+    ├── ratelimit.go            # per-IP token bucket
+    ├── waclient.go             # whatsmeow adapter interface
+    └── web/                    # SPA bundle (dev source + Vite dist)
+```
 
 ## Error model
 
-Translatable backend errors implement:
+Every translatable error in the backend implements `LocalizedError`:
 
 ```go
 type LocalizedError interface {
@@ -49,50 +44,93 @@ type LocalizedError interface {
 }
 ```
 
-Use `errors.As`-compatible implementations so localisation survives error wrapping.
+Why an interface and not a type assertion: it survives `fmt.Errorf("…: %w", err)`
+wrapping. `errors.As(err, &le)` unwraps the chain and finds the localised
+metadata even if a caller decorated the error mid-flight.
 
-When adding a translatable error:
+### Creating a new translatable error
 
-1. Add the key to `i18n_en.go`, `i18n_pt.go` and `i18n_es.go`.
-2. Use `newErrKey("err_foo")` or a typed struct when callers need structured data.
-3. Add a static interface assertion for custom structs.
-4. Surface it through `handleError` or `jsonErrorLocalized`.
+1. Add the translation key to every locale (`i18n_en.go`, `i18n_pt.go`,
+   `i18n_es.go`). Keys are stable once shipped — do not rename.
+2. Reach for the constructor that fits:
+   - `newErrKey("err_foo")` — most common; one key, optional args.
+   - A custom struct that implements `LocalizedError` — when the error
+     carries typed data the caller inspects (`*CooldownError` does this).
+3. Register the static assertion in `errors.go`:
 
-Wire shape:
+   ```go
+   var _ LocalizedError = (*myErr)(nil)
+   ```
+
+   This makes the build break the moment the interface drifts.
+
+### Surfacing it through HTTP
+
+Handlers call either:
+
+- `handleError(w, r, status, err)` — finds the localisation via
+  `errors.As` and emits the structured envelope.
+- `jsonErrorLocalized(w, r, status, key, args...)` — shortcut when the
+  caller knows the key inline; equivalent to `jsonError(w, status, key, T(r, key, args...))`.
+
+Wire shape (documented for integrators in `SECURITY.md`):
 
 ```json
 { "error": { "code": "err_phone_too_short", "message": "phone too short (minimum 7 digits, got 4)" } }
 ```
 
-## HTTP routes
+## SSE events
 
-Routes are registered centrally in `server.go`. Keep `README.md`, `SECURITY.md` and tests in sync when public routes or stable error codes change.
+`Event{Type string, Data any}` serialises as `{type, data}` over the wire.
+Every `data` payload is a typed struct (see `sse_events.go`). When you add
+a new event type:
 
-## Storage
+1. Define `XxxData` struct with JSON tags.
+2. Producer constructs `Event{Type: "xxx", Data: XxxData{…}}`.
+3. Frontend `sse.js` switches on `evt.type`; the dispatcher passes
+   `evt.data` to the matching handler.
 
-- SQLite runs in WAL mode with foreign keys enabled.
-- `ContactStore` methods take `context.Context` as the first argument and use `*Context` driver calls.
-- `SetMaxOpenConns(1)` serialises writes.
-- Schema changes ship as new files in `internal/server/migrations/`; do not edit existing migrations in place after release.
-- Current logical tables include `contacts`, `contact_groups`, `group_members`, `template_vars`, `broadcasts`, `broadcast_messages`, `outbox` and `schema_migrations`.
+`SSEHub.Broadcast` is non-blocking — slow subscribers get their event
+dropped (counted in `metricSSEDrops`). Never assume delivery.
 
 ## Broadcast lifecycle
 
-`Broadcaster.Start(ctx, cooldown)` is the only entry into the in-flight broadcast slot. It takes the mutex, checks cooldown, wires cancellation and returns a `StartHandle`.
+`Broadcaster.Start(ctx, cooldown)` is the only legitimate entry into the
+in-flight broadcast slot. It:
 
-Exactly one of these must happen:
+1. Takes `mu` (returns `ErrBroadcastRunning` if held).
+2. Enforces `cooldown` (returns `*CooldownError` otherwise).
+3. Wires a cancellable context.
+4. Returns a `*StartHandle`.
 
-- `handle.Done()` — normal goroutine completion, usually in a `defer`.
-- `handle.Abandon()` — validation failed after `Start` but before launching the goroutine.
+The handle owns `mu` + the cancel func + `wg`. Exactly one of:
 
-Both paths are `sync.Once` guarded. Forgetting both leaks the broadcast mutex and makes later callers see `ErrBroadcastRunning`.
+- `handle.Done()` — called by the goroutine on success (in a `defer`).
+- `handle.Abandon()` — called by the handler if validation between
+  `Start` and the goroutine launch fails.
 
-## SSE events
-
-`Event{Type string, Data any}` serialises as `{type, data}`. Every data payload should be a typed struct in `sse_events.go`.
-
-`SSEHub.Broadcast` is non-blocking; slow subscribers may drop events and `metricSSEDrops` counts those drops. Never assume SSE delivery.
+… must run. Both go through `sync.Once`, so accidentally calling both is
+safe; never calling either leaks the mutex forever (and the next caller
+sees `ErrBroadcastRunning`).
 
 ## Shutdown ordering
 
-`runShutdown` cancels `App.shutdownCtx`, closes the broadcaster to stop admission, cancels any active broadcast, waits for broadcast/outbox work, shuts down HTTP, disconnects WhatsApp, closes storage and stops rate limiters. New async work should derive from an appropriate context and fit this ordering.
+`App.shutdownCtx` is cancelled at the start of `runShutdown`. Anything
+that wants to wind down with the process derives from it:
+
+- `wa_events.handleReceiptEvent` writes happen under
+  `WithTimeout(app.shutdownCtx, 2s)`.
+- `resetClientAsync` runs under
+  `WithTimeout(app.shutdownCtx, 10s)`.
+- The broadcast goroutine receives its ctx from `Broadcaster.Start`
+  rooted at `context.Background()`; `cancelBroadcast("shutdown")` is
+  what stops it, called separately by `runShutdown` before HTTP close.
+
+## Storage
+
+`ContactStore` methods all take `context.Context` as the first argument
+and use `*Context` driver methods. SQLite is opened with `SetMaxOpenConns(1)`
+so writes serialise (WAL lets readers proceed in parallel against the
+same connection).
+
+For migrations see `internal/server/migrations/README.md`.

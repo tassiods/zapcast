@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -24,11 +24,11 @@ func (app *App) handleWAEvent(rawEvt any) {
 		app.broadcastEvent(Event{Type: "connected"})
 	case *events.Disconnected:
 		app.logger.Warn("whatsmeow disconnected")
-		app.cancelBroadcast("whatsapp disconnected")
+		_ = app.cancelBroadcast("whatsapp disconnected")
 		app.broadcastEvent(Event{Type: "disconnected"})
 	case *events.LoggedOut:
 		app.logger.Warn("whatsmeow logged out", "reason", evt.Reason.String())
-		app.cancelBroadcast("whatsapp logged out")
+		_ = app.cancelBroadcast("whatsapp logged out")
 		// WhatsApp invalidated this device. Swap in a fresh one so the next
 		// QR pairing doesn't use stale Noise/Identity keys.
 		go app.resetClientAsync()

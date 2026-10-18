@@ -3,34 +3,57 @@
 import { api } from './api.js';
 import { $, escHTML, escAttr, toast, summaryCard, debounceSearch, fold, formatDateTime } from './ui.js';
 import { t } from './i18n.js';
-import { prefillContacts } from './view-broadcast.js';
-import { navigate } from './router.js';
+import { campaignSummary, statusHTML } from './delivery-labels.js';
+import { loadDeliveryReview, initDeliveryReview, cancelRecoveredCampaign } from './delivery-review.js';
+
+/** Definitive failure is not the aggregate non-success count. Fail closed for legacy/incomplete campaigns. */
+export function safeFailedPhones(campaign, rows) {
+  if (campaign?.status !== 'completed' || !Array.isArray(rows) ||
+      Number(campaign.total) !== rows.length ||
+      !['pending', 'uncertain', 'cancelled', 'unresolved'].every(key => campaign[key] === 0)) return [];
+  return rows.filter(row => row.status === 'failed').map(row => row.phone).filter(Boolean);
+}
 
 /** Full last page — filters run client-side over this. */
 let allItems = [];
+let historyEpoch = 0;
+let historySequence = 0;
+window.addEventListener('zapcast:session-cleared', () => {
+  historyEpoch++; historySequence++; allItems = [];
+  $('historyList')?.replaceChildren(); $('statsCards')?.replaceChildren();
+});
 
 // ─── Loading ───────────────────────────────────────────────────
 
 export async function loadHistory() {
+  const current = historyEpoch, sequence = ++historySequence;
+  const review = loadDeliveryReview();
   try {
     const [stats, page] = await Promise.all([
       api('/api/stats'),
       api('/api/broadcasts?limit=500'),
     ]);
+    if (current !== historyEpoch || sequence !== historySequence) return;
     renderStats(stats || {});
     // Backwards compat: backend now returns { items, nextBefore } but tests
     // and older builds may still return a bare array.
     const items = Array.isArray(page) ? page : (page?.items || []);
     allItems = items;
     applyHistoryFilter();
+    await review;
   } catch (e) {
+    if (current !== historyEpoch) return;
     toast(t('msg_err_load_history') + (e instanceof Error ? e.message : String(e)), 'error');
   }
 }
 
 /** Lightweight stat refresh used when navigating to the broadcast page. */
 export async function refreshBroadcastStats() {
-  try { renderStats((await api('/api/stats')) || {}); } catch { /* non-fatal */ }
+  const current = historyEpoch;
+  try {
+    const stats = await api('/api/stats');
+    if (current === historyEpoch) renderStats(stats || {});
+  } catch { /* non-fatal */ }
 }
 
 // ─── Render ────────────────────────────────────────────────────
@@ -54,6 +77,7 @@ function renderStats(s) {
 
 function renderList(items) {
   const el = $('historyList');
+  if (!el) return;
   if (!items || !items.length) {
     const searchVal = /** @type {HTMLInputElement|null} */ ($('historySearch'))?.value || '';
     const filterVal = /** @type {HTMLSelectElement|null} */ ($('historyStatusFilter'))?.value || 'all';
@@ -72,7 +96,8 @@ export function applyHistoryFilter() {
   const f = /** @type {HTMLSelectElement|null} */ ($('historyStatusFilter'))?.value || 'all';
   renderList(allItems.filter((b) => {
     if (f === 'failed' && !(Number(b.fail) > 0)) return false;
-    if (f === 'clean' && Number(b.fail) > 0) return false;
+    if (f === 'clean' && !(b.status === 'completed' && b.fail === 0 &&
+      ['pending','uncertain','cancelled','unresolved'].every(key => b[key] === 0))) return false;
     if (!q) return true;
     const hay = fold(`${b.groupName || ''} ${b.message || ''} ${b.sentAt || ''}`);
     return hay.includes(q);
@@ -91,9 +116,13 @@ function rowHTML(b) {
   return `<div class="list-item" style="cursor:pointer" data-action="toggle-history" data-id="${escAttr(String(id))}">
     <div class="info">
       <div class="name">${escHTML(b.groupName)} <span class="tag">${Number(b.ok) || 0}/${Number(b.total) || 0}</span>${mediaChip}</div>
-      <div class="meta">${escHTML(formatDateTime(b.sentAt))} — ${escHTML(preview)}</div>
+      <div class="meta">${campaignSummary(b)}</div>
+      <div class="meta">${escHTML(formatDateTime(b.sentAt))}</div>
+      ${message ? `<div class="history-message-preview">${escHTML(preview)}</div>` : ''}
     </div>
   </div>
+  ${['active','interrupted','uncertain'].includes(b.status) ? `<button type="button" class="btn btn-danger btn-sm" data-action="cancel-campaign" data-id="${id}">Cancelar campanha</button>` : ''}
+  <div id="campaignError-${id}" role="alert"></div>
   <div class="group-detail" id="hd-${escAttr(String(id))}"></div>`;
 }
 
@@ -103,27 +132,27 @@ async function toggleHistoryDetail(id) {
   if (el.classList.contains('open')) { el.classList.remove('open'); return; }
   for (const open of document.querySelectorAll('.group-detail.open')) open.classList.remove('open');
 
+  const current = historyEpoch;
   try {
     const msgs = await api('/api/broadcasts/' + id);
-    const failedPhones = (msgs || [])
-      .filter((m) => !['sent', 'delivered', 'read'].includes(m.status))
-      .map((m) => m.phone)
-      .filter(Boolean);
-    el.innerHTML = (msgs || []).map((m) => {
-      const cls = 'badge-' + m.status;
+    if (current !== historyEpoch || !el.isConnected) return;
+    const campaign = allItems.find(b => Number(b.id) === Number(id));
+    const failedPhones = safeFailedPhones(campaign, msgs);
+    const message = campaign?.message || '';
+    const messageHTML = message ? `<section class="history-message"><strong>${escHTML(t('ui_message'))}</strong><div class="history-message-text">${escHTML(message)}</div></section>` : '';
+    const recipientsHTML = (msgs || []).map((m) => {
       return `<div class="member">
         <span>${escHTML(m.contactName)}</span>
-        <span class="badge-status ${cls}">${escHTML(m.status)}</span>
+        ${statusHTML(m.status)}
         <span>${escHTML(m.phone)}${m.error ? ' — ' + escHTML(m.error) : ''}</span>
       </div>`;
     }).join('') || `<div class="member">${escHTML(t('msg_no_records'))}</div>`;
-    if (failedPhones.length) {
-      el.innerHTML += `<div style="margin-top:10px;text-align:right">
-        <button class="btn btn-secondary btn-sm" data-action="retry-failed" data-phones="${escAttr(failedPhones.join(','))}">${escHTML(t('ui_retry_failed'))} (${failedPhones.length})</button>
-      </div>`;
-    }
+    el.innerHTML = messageHTML + recipientsHTML;
+    // Definitive failures still require linked durable intent review; never prefill a new broadcast.
+    if (failedPhones.length) el.innerHTML += `<p>${escHTML(t('ui_retry_failed'))}: ${failedPhones.length} — revisão individual abaixo.</p>`;
     el.classList.add('open');
   } catch (e) {
+    if (current !== historyEpoch) return;
     toast(t('msg_err_load_history') + (e instanceof Error ? e.message : String(e)), 'error');
   }
 }
@@ -131,17 +160,15 @@ async function toggleHistoryDetail(id) {
 // ─── Wiring ────────────────────────────────────────────────────
 
 export function initHistoryView() {
+  initDeliveryReview(loadHistory);
   $('historyRefreshBtn').addEventListener('click', loadHistory);
   $('historySearch').addEventListener('input', () => debounceSearch('historySearch', applyHistoryFilter));
   $('historyStatusFilter').addEventListener('change', applyHistoryFilter);
   $('historyList').addEventListener('click', (e) => {
-    const retry = /** @type {HTMLElement} */ (e.target).closest('[data-action="retry-failed"]');
-    if (retry) {
-      const phones = (retry.getAttribute('data-phones') || '').split(',').filter(Boolean);
-      if (phones.length) {
-        prefillContacts(phones);
-        navigate('broadcast');
-      }
+    const cancel = /** @type {HTMLElement} */ (e.target).closest('[data-action="cancel-campaign"]');
+    if (cancel) {
+      const id = Number(cancel.getAttribute('data-id'));
+      if (allItems.some(row => Number(row.id) === id && ['active','interrupted','uncertain'].includes(row.status))) cancelRecoveredCampaign(id, loadHistory);
       return;
     }
     const row = /** @type {HTMLElement} */ (e.target).closest('[data-action="toggle-history"]');

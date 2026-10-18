@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -20,6 +20,7 @@ import (
 type ClientErrorPayload struct {
 	Kind      string `json:"kind"`
 	Message   string `json:"message"`
+	Stack     string `json:"stack,omitempty"`
 	Source    string `json:"source,omitempty"`
 	Line      int    `json:"line,omitempty"`
 	Col       int    `json:"col,omitempty"`
@@ -32,16 +33,24 @@ func (app *App) handleClientError(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	// Only registered browser error categories become metric labels.
+	switch body.Kind {
+	case "window.error", "unhandledrejection":
+	default:
+		body.Kind = "unknown"
+	}
 	// Truncate again on the server side — the client already caps these,
 	// but a malicious caller could bypass the limit.
-	body.Message = truncate(body.Message, 500)
-	body.Source = truncate(body.Source, 200)
-	body.UserAgent = truncate(body.UserAgent, 200)
-	body.Href = truncate(body.Href, 500)
+	body.Message = truncate(app.sanitizeTelemetry(body.Message), 500)
+	body.Stack = truncate(app.sanitizeTelemetry(body.Stack), 2000)
+	body.Source = truncate(app.sanitizeTelemetry(sanitizeTelemetryURL(body.Source)), 200)
+	body.UserAgent = truncate(app.sanitizeTelemetry(body.UserAgent), 200)
+	body.Href = truncate(app.sanitizeTelemetry(sanitizeTelemetryURL(body.Href)), 500)
 
 	app.logger.Warn("client error",
 		"kind", body.Kind,
 		"message", body.Message,
+		"stack", body.Stack,
 		"source", body.Source,
 		"line", body.Line,
 		"col", body.Col,

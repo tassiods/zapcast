@@ -5,122 +5,99 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ci
 
-# Cancel previous runs on the same ref so a fresh push to a PR replaces
-# the in-flight job instead of queueing on top of it.
+permissions:
+  contents: read
+
+# Supersede branch/PR checks, but never cancel a manually requested release gate.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 jobs:
-  frontend:
-    name: frontend (vitest + tsc)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+      VERSION: ${{ inputs.version || 'ci' }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: '22'
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.3'
           cache: npm
-
-      - name: npm install
-        run: npm ci || npm install
-
-      - name: tsc --noEmit
-        run: npm run test:types
-
-      - name: vitest
-        run: npm test
-
-      - name: vite build
-        # Smoke-test the bundler so a broken build can't slip into a
-        # release branch; the artefact is uploaded for the release job.
-        run: npm run build
-
-      - name: upload bundle artefact
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          name: web-dist
-          path: internal/server/web/dist
-          retention-days: 14
-
-  build:
-    name: build / vet / test (race + coverage)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+          go-version: '1.26.9'
           cache: true
-
-      - name: gofmt
+      - name: Exact npm toolchain and mandatory lockfile
         run: |
-          unformatted=$(gofmt -s -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files need 'gofmt -s -w':"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-
-      - name: govulncheck
+          npm install --global npm@12.2.0
+          npm ci
+          npm audit --audit-level=moderate
+      - name: Delivery regression tests
+        run: npm run test:delivery
+      - name: Go formatting
+        run: test -z "$(gofmt -s -l $(git ls-files '*.go'))"
+      - name: Go module integrity and vet
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go mod verify
+          go vet ./...
+      - name: Pinned lint including gosec
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+          golangci-lint run ./...
+      - name: Pinned Go vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
-
-      - name: gosec
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -exclude=G104,G404 ./...
-
-      - name: build
-        env:
-          CGO_ENABLED: "1"
-        run: go build -o /dev/null ./...
-
-      - name: test (race + coverage)
-        env:
-          CGO_ENABLED: "1"
+      - name: Race and coverage
         run: |
           go test -race -coverprofile=coverage.out -covermode=atomic ./...
           go tool cover -func=coverage.out | tee coverage.txt
-          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
-          echo "TOTAL_COVERAGE=$total" >> "$GITHUB_ENV"
-          echo "::notice::Total coverage: ${total}%"
-
-      - name: enforce coverage threshold
-        env:
-          MIN_COVERAGE: "65"
+          python3 scripts/coverage.py coverage.txt 65
+      - name: Frontend types and units
         run: |
-          awk -v total="$TOTAL_COVERAGE" -v min="$MIN_COVERAGE" 'BEGIN {
-            if (total + 0 < min + 0) {
-              printf "coverage %.1f%% is below minimum %s%%\n", total, min
-              exit 1
-            }
-            printf "coverage %.1f%% is above minimum %s%%\n", total, min
-          }'
-
-      - name: upload coverage profile
-        if: always()
-        uses: actions/upload-artifact@v4
+          npm run test:types
+          npm test
+      - name: Build production assets and identified binary once
+        run: |
+          npm run build
+          python3 scripts/build.py "$VERSION"
+      - name: Real browser against the production binary
+        env:
+          ZAPCAST_E2E_BINARY: ${{ github.workspace }}/release-artifacts/zapcast-linux-amd64
+        run: |
+          test -x "$ZAPCAST_E2E_BINARY"
+          npx --no-install playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Verify release payload offline
+        run: python3 scripts/release.py --dry-run --version "$VERSION" --artifacts release-artifacts --sha "$GITHUB_SHA"
+      # No artifact is eligible for publication until every preceding gate passes.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: coverage-profile
+          name: tested-release-${{ github.sha }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: diagnostics-${{ github.sha }}
           path: |
             coverage.out
             coverage.txt
+            playwright-report/
+            test-results/
           retention-days: 14

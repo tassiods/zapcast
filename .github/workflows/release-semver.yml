@@ -1,0 +1,25 @@
+name: release-plan
+
+# Unsafe autonomous semantic-release is retired. Planning cannot publish.
+# Use release.yml to explicitly run same-SHA gates and publish their artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Reviewed proposed version (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Credential-free release plan
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/release.py --dry-run --version "$VERSION" --sha "$GITHUB_SHA"

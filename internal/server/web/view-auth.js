@@ -4,7 +4,7 @@
 // SSE-formatted lines with QR refreshes. We dispatch on Content-Type to keep
 // the happy path single-pass.
 
-import { api } from './api.js';
+import { api, apiFetch } from './api.js';
 import { $, show, toast, toastErr, confirmDialog } from './ui.js';
 import { t } from './i18n.js';
 import { stopSSE } from './sse.js';
@@ -33,7 +33,7 @@ async function startAuth(resetBudget = true) {
   if (resetBudget) qrAutoRetries = 0;
 
   try {
-    const response = await fetch('/api/auth/qr', { method: 'POST' });
+    const response = await apiFetch('/api/auth/qr', { method: 'POST' });
     const ct = response.headers.get('Content-Type') || '';
 
     if (ct.includes('application/json')) {

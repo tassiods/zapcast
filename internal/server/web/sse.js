@@ -9,7 +9,6 @@
 // Consumers pass per-event handlers; the dispatcher walks `event.type` to
 // avoid the giant `if/else` that lived in the old monolith.
 
-import { withAuthQuery } from './api.js';
 
 /** @type {EventSource|null} */
 let current = null;
@@ -34,9 +33,8 @@ let reconnectDelay = RECONNECT_BASE_MS;
 export function startSSE(handlers) {
   stopSSE();
 
-  // EventSource cannot set Authorization headers, so we fall back to the
-  // ?token= query string accepted by authMiddleware.
-  const es = new EventSource(withAuthQuery('/api/events'));
+  // Same-origin EventSource sends the HttpOnly session cookie automatically.
+  const es = new EventSource('/api/events');
   current = es;
 
   es.onopen = () => {

@@ -1,11 +1,13 @@
 // view-import.js — CSV import preview + export.
 
-import { api, getAuthToken } from './api.js';
+import { api, apiBlob } from './api.js';
 import { $, escHTML, show, toast, toastErr, summaryCard } from './ui.js';
 import { t } from './i18n.js';
 
 /** @type {string|null} */
 let pendingCSV = null;
+let importEpoch = 0;
+window.addEventListener('zapcast:session-cleared', () => { pendingCSV = null; importEpoch++; });
 
 let onAfterImport = () => {};
 
@@ -16,8 +18,10 @@ export function setOnAfterImport(fn) { onAfterImport = fn; }
 
 function handleFile(file) {
   if (!file) return;
+  const epoch = importEpoch;
   const reader = new FileReader();
   reader.onload = (e) => {
+    if(epoch !== importEpoch) return;
     const text = /** @type {string} */ (e.target?.result);
     const lines = text.trim().split('\n');
     if (lines.length < 2) { toast('err_csv_empty', 'error'); return; }
@@ -131,14 +135,8 @@ async function doImport() {
 // ─── Export ────────────────────────────────────────────────────
 
 async function exportCSV() {
-  const tok = getAuthToken();
   try {
-    const res = await fetch('/api/contacts/export', {
-      headers: tok ? { Authorization: 'Bearer ' + tok } : {},
-    });
-    if (res.status === 401) { toast('Unauthorized', 'error'); return; }
-    if (!res.ok) { toast('HTTP ' + res.status, 'error'); return; }
-    const blob = await res.blob();
+    const blob = await apiBlob('/api/contacts/export');
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

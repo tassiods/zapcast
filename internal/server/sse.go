@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -8,6 +8,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -138,14 +139,27 @@ var eventSeq atomic.Uint64
 const sseWriteTimeout = 10 * time.Second
 
 // setSSEWriteDeadline arms a per-write deadline via the ResponseController.
-// Best-effort: controllers that don't support deadlines are ignored.
-func setSSEWriteDeadline(w http.ResponseWriter) {
+// Socket errors terminate the stream. Unsupported in-memory writers are
+// explicitly logged; production net/http sockets support write deadlines.
+func setSSEWriteDeadline(w http.ResponseWriter) error {
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	if errors.Is(err, http.ErrNotSupported) {
+		// In-memory test writers lack deadlines; real net/http sockets support them.
+		slog.Debug("SSE writer does not support write deadlines")
+		return nil
+	}
+	return err
 }
 
 // handleSSE is the /api/events long poll.
 func (app *App) handleSSE(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel, authorized := app.authorizedStreamContext(r)
+	defer cancel()
+	if !authorized() {
+		jsonError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return
+	}
 	if !app.sseOriginAllowed(r) {
 		http.Error(w, "origin not allowed", http.StatusForbidden)
 		return
@@ -171,16 +185,21 @@ func (app *App) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ka := time.NewTicker(keepaliveEvery)
 	defer ka.Stop()
 
-	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ka.C:
+			if !authorized() {
+				return
+			}
 			if !writeSSEComment(w, flusher) {
 				return
 			}
 		case evt := <-ch:
+			if !authorized() {
+				return
+			}
 			if !writeSSEFrame(w, flusher, evt) {
 				return
 			}
@@ -191,12 +210,13 @@ func (app *App) handleSSE(w http.ResponseWriter, r *http.Request) {
 // writeSSEComment emits a keepalive comment frame with a bounded write
 // deadline. Returns false when the write fails so the caller can stop.
 func writeSSEComment(w http.ResponseWriter, flusher http.Flusher) bool {
-	setSSEWriteDeadline(w)
+	if setSSEWriteDeadline(w) != nil {
+		return false
+	}
 	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 		return false
 	}
-	flusher.Flush()
-	return true
+	return http.NewResponseController(w).Flush() == nil
 }
 
 // writeSSEFrame writes one event in id/event/data shape. Flushes after each
@@ -206,7 +226,9 @@ func writeSSEFrame(w http.ResponseWriter, flusher http.Flusher, evt Event) bool 
 	if strings.ContainsAny(evt.Type, "\r\n") {
 		panic(fmt.Sprintf("sse: event Type %q contains CR/LF; refusing to serialise", evt.Type))
 	}
-	setSSEWriteDeadline(w)
+	if setSSEWriteDeadline(w) != nil {
+		return false
+	}
 	id := eventSeq.Add(1)
 	if _, err := fmt.Fprintf(w, "id: %d\n", id); err != nil {
 		return false
@@ -219,8 +241,7 @@ func writeSSEFrame(w http.ResponseWriter, flusher http.Flusher, evt Event) bool 
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", mustJSON(evt)); err != nil {
 		return false
 	}
-	flusher.Flush()
-	return true
+	return http.NewResponseController(w).Flush() == nil
 }
 
 // setupSSE writes Server-Sent-Events headers and returns the underlying
@@ -257,7 +278,7 @@ func (app *App) sseOriginAllowed(r *http.Request) bool {
 		return true
 	}
 	if app.allowedOrigin != "" {
-		return origin == app.allowedOrigin
+		return originsEqual(origin, app.allowedOrigin)
 	}
 	return isSameOriginRequest(r, origin)
 }
