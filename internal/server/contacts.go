@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -78,7 +78,7 @@ func NewContactStore(ctx context.Context, lg *slog.Logger, dbPath string) (*Cont
 		"?_foreign_keys=on" +
 		"&_journal_mode=WAL" +
 		"&_busy_timeout=5000" +
-		"&_synchronous=NORMAL" +
+		"&_synchronous=FULL" +
 		"&_cache_size=-8000"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
@@ -640,15 +640,20 @@ func (s *ContactStore) ImportContacts(ctx context.Context, rows []ImportRow) (cr
 
 // BroadcastSummary is one entry in the broadcast history list.
 type BroadcastSummary struct {
-	ID        int64  `json:"id"`
-	GroupName string `json:"groupName"`
-	Message   string `json:"message"`
-	Total     int    `json:"total"`
-	OK        int    `json:"ok"`
-	Fail      int    `json:"fail"`
-	SentAt    string `json:"sentAt"`
-	MediaType string `json:"mediaType,omitempty"`
-	MediaName string `json:"mediaName,omitempty"`
+	Status     string `json:"status"`
+	Pending    int    `json:"pending"`
+	Uncertain  int    `json:"uncertain"`
+	Cancelled  int    `json:"cancelled"`
+	Unresolved int    `json:"unresolved"`
+	ID         int64  `json:"id"`
+	GroupName  string `json:"groupName"`
+	Message    string `json:"message"`
+	Total      int    `json:"total"`
+	OK         int    `json:"ok"`
+	Fail       int    `json:"fail"`
+	SentAt     string `json:"sentAt"`
+	MediaType  string `json:"mediaType,omitempty"`
+	MediaName  string `json:"mediaName,omitempty"`
 }
 
 // BroadcastMessage is a per-recipient delivery record.
@@ -666,6 +671,13 @@ type BroadcastMessage struct {
 }
 
 func (s *ContactStore) UpdateBroadcastCounts(ctx context.Context, id int64, ok, fail int) error {
+	var state string
+	if err := s.db.QueryRowContext(ctx, `SELECT delivery_state FROM broadcasts WHERE id=?`, id).Scan(&state); err != nil {
+		return err
+	}
+	if state != "legacy" {
+		return s.reconcileDelivery(ctx, id)
+	}
 	_, err := s.db.ExecContext(ctx, "UPDATE broadcasts SET ok_count = ?, fail_count = ? WHERE id = ?", ok, fail, id)
 	return err
 }
@@ -732,8 +744,45 @@ func (s *ContactStore) UpdateMessageStatus(ctx context.Context, messageID, statu
 	default:
 		return newErrKey("err_invalid_status")
 	}
-	_, err := s.db.ExecContext(ctx, query, status, messageID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO delivery_receipts(message_id,status,read_at) VALUES(?,?,CASE WHEN ?='read' THEN CURRENT_TIMESTAMP ELSE NULL END)
+ ON CONFLICT(message_id) DO UPDATE SET status=CASE WHEN delivery_receipts.status='read' THEN 'read' ELSE excluded.status END,read_at=COALESCE(delivery_receipts.read_at,excluded.read_at)`, messageID, status, status); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, query, status, messageID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE status<>'inflight' AND broadcast_message_id IN (SELECT id FROM broadcast_messages WHERE message_id=? AND status IN ('delivered','read'))`, messageID); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT broadcast_id FROM broadcast_messages WHERE message_id=?`, messageID)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err = tx.ExecContext(ctx, reconcileDeliverySQL, id, id, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ListBroadcasts returns the broadcast summary list (most recent first).
@@ -743,7 +792,12 @@ func (s *ContactStore) ListBroadcasts(ctx context.Context, limit int, before int
 		limit = 100
 	}
 	query := `SELECT id, group_name, message, total, ok_count, fail_count, sent_at,
-			COALESCE(media_type, ''), COALESCE(media_name, '')
+			COALESCE(media_type, ''), COALESCE(media_name, ''), delivery_state,
+ (SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id AND status IN ('pending','inflight')),
+ (SELECT COUNT(*) FROM outbox WHERE broadcast_id=broadcasts.id AND status='uncertain') +
+ (SELECT COUNT(*) FROM broadcast_messages m WHERE m.broadcast_id=broadcasts.id AND m.status='uncertain' AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.broadcast_message_id=m.id AND o.status='uncertain')),
+ (SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id AND status='cancelled'),
+ MAX(0,total-(SELECT COUNT(*) FROM broadcast_messages WHERE broadcast_id=broadcasts.id))
 		FROM broadcasts`
 	args := []any{}
 	if before > 0 {
@@ -761,7 +815,7 @@ func (s *ContactStore) ListBroadcasts(ctx context.Context, limit int, before int
 	out := []BroadcastSummary{}
 	for rows.Next() {
 		var b BroadcastSummary
-		if err := rows.Scan(&b.ID, &b.GroupName, &b.Message, &b.Total, &b.OK, &b.Fail, &b.SentAt, &b.MediaType, &b.MediaName); err != nil {
+		if err := rows.Scan(&b.ID, &b.GroupName, &b.Message, &b.Total, &b.OK, &b.Fail, &b.SentAt, &b.MediaType, &b.MediaName, &b.Status, &b.Pending, &b.Uncertain, &b.Cancelled, &b.Unresolved); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

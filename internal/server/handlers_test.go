@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -804,9 +804,9 @@ func TestHandleAuthRequired(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status %d", rec.Code)
 	}
-	var out map[string]bool
+	var out AuthRequiredResponse
 	decodeBody(t, rec, &out)
-	if out["required"] {
+	if out.Required {
 		t.Errorf("expected required=false when authToken empty, got %+v", out)
 	}
 
@@ -814,7 +814,7 @@ func TestHandleAuthRequired(t *testing.T) {
 	rec = httptest.NewRecorder()
 	app.handleAuthRequired(rec, httptest.NewRequest("GET", "/api/auth/required", nil))
 	decodeBody(t, rec, &out)
-	if !out["required"] {
+	if !out.Required {
 		t.Errorf("expected required=true with authToken set, got %+v", out)
 	}
 }

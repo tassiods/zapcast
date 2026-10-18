@@ -3,6 +3,8 @@
  * Below that, layout → components → utilities → responsive overrides.
  * Compact one-rule-per-line is the house style; only break up long selectors. */
 
+#swUpdateBtn[hidden] { display: none; }
+
 /* ─── Reset ──────────────────────────────────────────────────── */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -549,6 +551,9 @@ select {
 .list-item .info .name { font-weight: 500; font-size: 13.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-item .info .meta { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-item .actions { display: flex; gap: 6px; flex-shrink: 0; margin-left: 12px; }
+.history-message-preview { font-size: 12px; color: var(--ink-2); margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-message { padding: 12px 14px; border-bottom: 1px solid var(--line-2); }
+.history-message-text { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
 .tag { display: inline-block; padding: 2px 8px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; font-size: 10.5px; font-weight: 600; margin-right: 4px; letter-spacing: 0.01em; }
 
 .empty-state { text-align: center; padding: 40px 20px; color: var(--ink-3); }
@@ -790,7 +795,17 @@ button.recipient-badge { border: none; font-family: var(--font-mono); cursor: po
 .badge-sent { background: var(--accent-soft); color: var(--accent); }
 .badge-delivered { background: var(--warn-soft); color: var(--warn); }
 .badge-read { background: var(--ok-soft); color: var(--ok); }
-.badge-failed { background: var(--err-soft); color: var(--err); }
+.badge-failed, .badge-dead { background: var(--err-soft); color: var(--err); }
+.badge-pending, .badge-inflight, .badge-preparing, .badge-active { background: var(--accent-soft); color: var(--accent); }
+.badge-uncertain, .badge-interrupted, .badge-legacy, .badge-unknown { background: var(--warn-soft); color: var(--warn); }
+.badge-cancelled { background: var(--surface3); color: var(--ink-2); }
+.badge-completed { background: var(--ok-soft); color: var(--ok); }
+.delivery-review-row { border-top: 1px solid var(--border); padding: 14px 0; overflow-wrap: anywhere; }
+.delivery-review-row p, #deliveryReview > p { margin: 10px 0; color: var(--ink-2); line-height: 1.5; }
+.delivery-review-error { color: var(--err); margin-top: 10px; white-space: pre-wrap; }
+#deliveryReviewModal label { display: block; margin: 14px 0; line-height: 1.5; }
+#deliveryReviewModal input[type="checkbox"] { margin-right: 8px; }
+#deliveryReviewModal .modal { max-height: 90vh; overflow-y: auto; }
 
 /* ─── Scrollbar (dark) ───────────────────────────────────────── */
 

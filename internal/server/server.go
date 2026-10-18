@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 // Package server is the body of the ZapCast HTTP service.
@@ -74,6 +74,7 @@ type App struct {
 	outbox      *OutboxWorker
 
 	authToken     string
+	authMode      string
 	allowedOrigin string
 
 	// sessionKeyDir is where the persisted session HMAC key lives
@@ -81,6 +82,7 @@ type App struct {
 	sessionKeyDir   string
 	sessionKeyOnce  sync.Once
 	sessionKeyValue []byte
+	sessions        sessionState
 
 	qrLimiter        *rateLimiter
 	logoutLimiter    *rateLimiter
@@ -97,10 +99,25 @@ type App struct {
 func (app *App) subscribe() chan Event     { return app.hub.Subscribe() }
 func (app *App) unsubscribe(ch chan Event) { app.hub.Unsubscribe(ch) }
 func (app *App) broadcastEvent(evt Event)  { app.hub.Broadcast(evt) }
-func (app *App) cancelBroadcast(reason string) {
+func (app *App) cancelBroadcast(reason string) error {
+	var err error
 	if app.broadcaster != nil {
+		app.broadcaster.attemptMu.Lock()
+		defer app.broadcaster.attemptMu.Unlock()
+	}
+	if app.contacts != nil && reason != "shutdown" {
+		ctx, cancel := persistContext()
+		defer cancel()
+		err = app.contacts.cancelDelivery(ctx, 0, reason)
+		if err != nil {
+			app.logger.Error("durable cancellation failed", "err", err)
+		}
+	}
+	if app.broadcaster != nil {
+		app.broadcaster.cancelAttemptsLocked(0)
 		app.broadcaster.Cancel(reason)
 	}
+	return err
 }
 
 // WA returns the current WAClient under a read lock. Capture once per
@@ -152,6 +169,11 @@ func Run() {
 	configureDeviceProps()
 
 	host, port, storeDir := readBootEnv()
+	mode, authErr := validateAuthConfig(host, strings.TrimSpace(os.Getenv("AUTH_TOKEN")), strings.TrimSpace(os.Getenv("AUTH_MODE")), strings.TrimSpace(os.Getenv("FRONTEND_ORIGIN")))
+	if authErr != nil {
+		lg.Error("invalid authentication configuration", "err", authErr)
+		os.Exit(1)
+	}
 	if err := prepareStoreDir(lg, storeDir); err != nil {
 		lg.Error("failed to prepare store directory", "err", err, "dir", storeDir)
 		os.Exit(1)
@@ -165,21 +187,31 @@ func Run() {
 
 	app := newApp(lg, container, contactStore, client)
 	app.sessionKeyDir = storeDir
+	app.authMode = mode
+	if app.authToken != "" {
+		if len(app.sessionKey()) != 32 {
+			lg.Error("session key unavailable")
+			os.Exit(1)
+		}
+		app.sessions.mu.Lock()
+		app.loadSessionsLocked()
+		sessionErr := app.sessions.err
+		app.sessions.mu.Unlock()
+		if sessionErr != nil {
+			lg.Error("session registry unavailable", "err", sessionErr)
+			os.Exit(1)
+		}
+	}
 	warnAuthConfig(lg, app, host)
 
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if t, err := contactStore.LastBroadcastTime(bootCtx); err == nil && !t.IsZero() {
 		app.broadcaster.SetLast(t)
 	}
-	// Broadcasts are not restart-safe: a send goroutine killed mid-flight
-	// leaves its remaining recipients unsent (their rendered bodies were never
-	// persisted). Surface any such interruption from the last run instead of
-	// letting it pass silently.
-	if ids, err := contactStore.TakeInterruptedBroadcasts(bootCtx); err != nil {
-		lg.Warn("failed to check for interrupted broadcasts", "err", err)
-	} else if len(ids) > 0 {
-		lg.Warn("broadcasts interrupted by a previous restart — remaining recipients were NOT sent",
-			"broadcast_ids", ids, "count", len(ids))
+	if err := contactStore.recoverDeliveries(bootCtx); err != nil {
+		lg.Error("delivery recovery failed; refusing to send", "err", err)
+		bootCancel()
+		os.Exit(1)
 	}
 	bootCancel()
 
@@ -373,6 +405,7 @@ func (app *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/import", app.handleImport)
 	mux.Handle("POST /api/broadcast", app.broadcastLimiter.Middleware("/api/broadcast", http.HandlerFunc(app.handleBroadcast)))
 	mux.HandleFunc("POST /api/broadcast/cancel", app.handleBroadcastCancel)
+	mux.HandleFunc("POST /api/broadcasts/{id}/cancel", app.handleDeliveryCancel)
 	mux.HandleFunc("GET /api/broadcasts", app.handleBroadcastList)
 	mux.HandleFunc("GET /api/broadcasts/{id}", app.handleBroadcastByID)
 	mux.HandleFunc("GET /api/stats", app.handleStats)
@@ -384,6 +417,8 @@ func (app *App) registerRoutes(mux *http.ServeMux) {
 
 	// Outbox: rows that exhausted retries.
 	mux.HandleFunc("GET /api/outbox/dead", app.handleOutboxDead)
+	mux.HandleFunc("GET /api/delivery/review", app.handleDeliveryReview)
+	mux.HandleFunc("POST /api/delivery/{id}/resolve", app.handleDeliveryResolve)
 
 	// Runtime metrics. Gated by auth when AUTH_TOKEN is set.
 	mux.HandleFunc("GET /debug/vars", handleMetrics)
@@ -415,7 +450,7 @@ func (app *App) runShutdown(server *http.Server) {
 	// Stop admitting new broadcasts before waiting on the WaitGroup, so a
 	// late request can't Add(1) concurrently with wg.Wait.
 	app.broadcaster.Close()
-	app.cancelBroadcast("shutdown")
+	_ = app.cancelBroadcast("shutdown")
 	// Wait up to 10s for the broadcast goroutine to finish writing aborted rows.
 	done := make(chan struct{})
 	go func() { app.broadcaster.wg.Wait(); close(done) }()

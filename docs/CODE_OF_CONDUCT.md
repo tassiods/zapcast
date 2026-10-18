@@ -29,8 +29,8 @@ individual is officially representing the project in public spaces.
 Concerns about behaviour that may violate this Code of Conduct can be
 reported privately to the maintainer through
 [GitHub security advisories](https://github.com/tassiods/zapcast/security/advisories/new)
-or through the repository maintainers. All reports will be reviewed and
-handled with discretion.
+or by direct message on GitHub to **@tassiods**. All reports will be
+reviewed and handled with discretion.
 
 Maintainers are expected to follow and enforce this Code of Conduct in
 good faith. Violations may result in actions ranging from a private

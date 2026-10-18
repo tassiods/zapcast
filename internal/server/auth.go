@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -43,7 +43,11 @@ func Version() string {
 
 // AuthRequiredResponse is the body of /api/auth/required.
 type AuthRequiredResponse struct {
-	Required bool `json:"required"`
+	Required      bool   `json:"required"`
+	Mode          string `json:"mode"`
+	Authenticated bool   `json:"authenticated"`
+	SessionID     string `json:"sessionId,omitempty"`
+	ExpiresAt     int64  `json:"expiresAt,omitempty"`
 }
 
 // StatusResponse is the body of /api/status. Phone is empty when no device is
@@ -67,8 +71,24 @@ type LogoutResponse struct {
 	Status string `json:"status"` // always "logged_out"
 }
 
-func (app *App) handleAuthRequired(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, AuthRequiredResponse{Required: app.authToken != ""})
+func (app *App) handleAuthRequired(w http.ResponseWriter, r *http.Request) {
+	mode := app.authMode
+	if mode == "" {
+		if app.authToken != "" {
+			mode = "native"
+		} else {
+			mode = "local"
+		}
+	}
+	resp := AuthRequiredResponse{Required: app.authToken != "", Mode: mode, Authenticated: app.streamAuthorization(r)()}
+	if c, err := r.Cookie(sessionCookieName); err == nil && app.validSessionCookie(c.Value) {
+		resp.SessionID = sessionIdentity(c.Value)
+		app.sessions.mu.Lock()
+		resp.ExpiresAt = app.sessions.active[resp.SessionID]
+		app.sessions.mu.Unlock()
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (app *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
@@ -92,6 +112,13 @@ type QRCodeData struct {
 
 // handleAuthQR pairs a fresh WhatsApp device. Returns JSON or SSE stream.
 func (app *App) handleAuthQR(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel, authorized := app.authorizedStreamContext(r)
+	defer cancel()
+	if !authorized() {
+		jsonError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return
+	}
+	r = r.WithContext(ctx)
 	// Fast path: already paired, skip the SSE loop.
 	if probe := app.WA(); probe.IsConnected() && probe.JID() != nil {
 		jsonResponse(w, http.StatusOK, AuthAlreadyConnectedResponse{
@@ -132,15 +159,20 @@ func (app *App) handleAuthQR(w http.ResponseWriter, r *http.Request) {
 	const pairingDeadline = 120 * time.Second
 	timeout := time.After(pairingDeadline)
 
-	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timeout:
+			if !authorized() {
+				return
+			}
 			writeSSEFrame(w, flusher, Event{Type: "timeout"})
 			return
 		case evt, open := <-qrChan:
+			if !authorized() {
+				return
+			}
 			if !open {
 				return
 			}
@@ -148,7 +180,9 @@ func (app *App) handleAuthQR(w http.ResponseWriter, r *http.Request) {
 			if res.Frame == nil {
 				continue
 			}
-			writeSSEFrame(w, flusher, *res.Frame)
+			if !writeSSEFrame(w, flusher, *res.Frame) {
+				return
+			}
 			if res.SideEvent != nil {
 				app.broadcastEvent(*res.SideEvent)
 			}

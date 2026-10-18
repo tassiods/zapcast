@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -125,7 +125,7 @@ func TestRunBroadcastAbortPersistsAbortedRows(t *testing.T) {
 		t.Fatalf("expected 3 aborted rows persisted, got %d", len(msgs))
 	}
 	for _, m := range msgs {
-		if m.Status != "failed" || m.Error != "aborted" {
+		if m.Status != "cancelled" || m.Error != "aborted" {
 			t.Errorf("expected failed/aborted row, got %+v", m)
 		}
 	}
@@ -146,7 +146,7 @@ func TestRunBroadcastAbortPersistsAbortedRows(t *testing.T) {
 func TestOutboxRetrySucceedsEndToEnd(t *testing.T) {
 	wa := &fakeWA{
 		connected:      true,
-		sendErrAtIndex: map[int]error{0: errBoom},
+		sendErrAtIndex: map[int]error{0: &RejectedDeliveryError{Err: errBoom}},
 	}
 	app := newTestAppWithWA(t, wa)
 	id, _ := app.contacts.CreateBroadcast(ctx, "G", "hi", 1, 0, 0, "", "")
@@ -179,7 +179,7 @@ func TestOutboxRetrySucceedsEndToEnd(t *testing.T) {
 	}
 
 	// Retry through the worker path; the fake now succeeds (index 1).
-	w := &OutboxWorker{app: app, logger: app.logger}
+	w := &OutboxWorker{app: app, logger: app.logger, now: func() time.Time { return row.NextAttemptAt }}
 	w.attempt(ctx, app.WA(), row)
 
 	// Row gone from the outbox…
@@ -202,7 +202,7 @@ func TestOutboxRetrySucceedsEndToEnd(t *testing.T) {
 }
 
 func TestOutboxRetryFailureReschedulesThenDies(t *testing.T) {
-	wa := &fakeWA{connected: true, sendErrAll: errBoom}
+	wa := &fakeWA{connected: true, sendErrAll: &RejectedDeliveryError{Err: errBoom}}
 	app := newTestAppWithWA(t, wa)
 	id, _ := app.contacts.CreateBroadcast(ctx, "G", "hi", 1, 0, 0, "", "")
 
@@ -218,9 +218,11 @@ func TestOutboxRetryFailureReschedulesThenDies(t *testing.T) {
 	row := due[0]
 
 	// Every attempt fails; outboxMaxAttempts-1 reschedules keep it pending…
-	w := &OutboxWorker{app: app, logger: app.logger}
+	now := row.NextAttemptAt
+	w := &OutboxWorker{app: app, logger: app.logger, now: func() time.Time { return now }}
 	for i := 0; i < outboxMaxAttempts-1; i++ {
 		w.attempt(ctx, app.WA(), row)
+		now = now.Add(time.Hour)
 	}
 	due, err = app.contacts.FetchDueOutbox(ctx, time.Now().Add(48*time.Hour))
 	if err != nil || len(due) != 1 {

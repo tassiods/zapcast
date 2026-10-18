@@ -1,13 +1,11 @@
 services:
   zapcast:
-    build: .
-    image: zapcast:latest
-    container_name: zapcast
+    build:
+      context: .
+      args:
+        VERSION: "${ZAPCAST_VERSION:?set the reviewed version}"
+    image: "${ZAPCAST_IMAGE:?set the reviewed image tag or registry digest}"
     restart: unless-stopped
-    # Default: bind the host port to 127.0.0.1 only — the app has no built-in
-    # authentication, so anything wider needs a reverse-proxy with TLS + auth
-    # (or `AUTH_TOKEN` set). Override with `ZAPCAST_BIND=0.0.0.0 PORT=3000`
-    # in your shell / .env to expose on the LAN.
     ports:
       - "${ZAPCAST_BIND:-127.0.0.1}:${PORT:-3000}:3000"
     environment:
@@ -16,18 +14,33 @@ services:
       STORE_DIR: /app/store
       LOG_LEVEL: info
       LOG_FORMAT: json
-      # Set AUTH_TOKEN to require a bearer token on every API request.
-      # AUTH_TOKEN: ""
+      # Native mode is fail-closed without AUTH_TOKEN; proxy must be explicitly chosen.
+      AUTH_MODE: "${AUTH_MODE:-native}"
+      AUTH_TOKEN: "${AUTH_TOKEN:-}"
+      FRONTEND_ORIGIN: "${FRONTEND_ORIGIN:-}"
+      TRUST_PROXY: "${TRUST_PROXY:-}"
     volumes:
       - zapcast_store:/app/store
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
     mem_limit: 512m
     cpus: 1.0
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/healthz || exit 1"]
+      test: ["CMD", "/app/zapcast", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
 volumes:
   zapcast_store:

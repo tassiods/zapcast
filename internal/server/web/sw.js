@@ -1,135 +1,76 @@
-// ZapCast service worker.
-//
-// The cache key is derived from the backend ETag (which itself is a hash of
-// every embedded asset). When a new binary ships the hash flips, the next
-// install opens a fresh cache and the activate handler purges everything
-// older. No manual VERSION bump to forget on deploy.
-
-const FALLBACK_VERSION = 'zapcast-bootstrap';
-const APP_SHELL = [
-  '/',
-  '/styles.css',
-  '/theme-boot.js',
-  '/app.js',
-  '/state.js',
-  '/api.js',
-  '/ui.js',
-  '/i18n.js',
-  '/router.js',
-  '/settings.js',
-  '/sse.js',
-  '/picker.js',
-  '/view-broadcast.js',
-  '/view-contacts.js',
-  '/view-groups.js',
-  '/view-import.js',
-  '/view-templates.js',
-  '/view-history.js',
-  '/view-auth.js',
-  '/manifest.webmanifest',
-  '/icon.svg',
-  '/icon-maskable.svg',
-  '/favicon.svg',
-  '/favicon.ico',
-  '/apple-touch-icon.png',
-  '/favicon-96x96.png',
-  '/web-app-manifest-192x192.png',
-  '/web-app-manifest-512x512.png',
-];
-
-self.addEventListener('install', (event) => {
-  event.waitUntil((async () => {
-    const version = await readVersion();
-    const cache = await caches.open(version);
-    await cache.addAll(APP_SHELL);
-    self.skipWaiting();
-  })());
+// Dev/source embeds intentionally do not cache unversioned modules.
+// Vite injects the immutable list of emitted production assets.
+const BUILD = self.__ZAPCAST_BUILD__;
+const PREFIX = 'zapcast-';
+const CACHE = BUILD ? `${PREFIX}shell-${BUILD.id}` : '';
+const paths = new Set(BUILD?.assets || []);
+let purged = false;
+self.addEventListener('message', event => {
+  if(event.data?.type === 'ACTIVATE') event.waitUntil(self.skipWaiting());
+  if(event.data?.type === 'PURGE') {
+    purged = true;
+    event.waitUntil((async () => {
+      for(const key of await caches.keys()) if(key.startsWith(PREFIX)) await caches.delete(key);
+      event.ports?.[0]?.postMessage('purged');
+    })());
+  }
 });
 
-self.addEventListener('activate', (event) => {
+self.addEventListener('install', event => {
+  if (!BUILD) return;
   event.waitUntil((async () => {
-    const version = await readVersion();
-    const keys = await caches.keys();
-    const stale = keys.filter((k) => k !== version);
-    await Promise.all(stale.map((k) => caches.delete(k)));
+    const cache = await caches.open(CACHE);
+    try {
+      // Validate the entire generation before writing any response.
+      const responses = [];
+      for(const path of BUILD.assets) {
+        const response = await fetch(path, {cache:'no-store', credentials:'omit', redirect:'error', integrity:BUILD.integrity[path]});
+        const control = response.headers.get('Cache-Control') || '';
+        const type = response.headers.get('Content-Type') || '';
+        const expected = path === '/' ? /^text\/html\b/i : path.endsWith('.js') ? /^(text|application)\/(javascript|ecmascript)\b/i : path.endsWith('.css') ? /^text\/css\b/i : path.endsWith('.webmanifest') ? /^application\/(manifest\+json|json)\b/i : /^image\//i;
+        if(response.status !== 200 || response.type !== 'basic' || response.redirected ||
+          new URL(response.url).pathname !== path || /(?:no-store|private)/i.test(control) || !expected.test(type)) {
+          throw new Error('Unsafe precache response');
+        }
+        responses.push([path,response]);
+      }
+      if(purged) throw new Error('Session cleared');
+      for(const [path,response] of responses) {
+        await cache.put(path,response);
+        if(purged) throw new Error('Session cleared');
+      }
+    }
+    catch (error) { await caches.delete(CACHE); throw error; }
+  })());
+});
+self.addEventListener('activate', event => {
+  event.waitUntil((async () => {
+    // Retain live generations: another tab may still run their modules.
+    for(const key of await caches.keys()) {
+      if(key.startsWith(PREFIX) && !key.startsWith(`${PREFIX}shell-`)) await caches.delete(key);
+    }
     await self.clients.claim();
-    // A purge means a new binary shipped while tabs were open — tell them
-    // so the UI can offer a reload instead of running the old shell.
-    if (stale.length > 0) {
-      const clients = await self.clients.matchAll({ type: 'window' });
-      for (const c of clients) c.postMessage({ type: 'sw-updated', version });
-    }
   })());
 });
-
-self.addEventListener('fetch', (event) => {
-  const req = event.request;
-  if (req.method !== 'GET') return;
-
-  const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return;
-
-  // Never intercept API, SSE or probes — these are live data and must hit
-  // the backend so receipts, broadcast progress and auth checks stay accurate.
-  if (
-    url.pathname.startsWith('/api/') ||
-    url.pathname === '/healthz' ||
-    url.pathname === '/readyz'
-  ) {
-    return;
-  }
-
-  const wantsHTML =
-    req.headers.get('accept')?.includes('text/html') ||
-    req.mode === 'navigate';
-
-  if (wantsHTML) {
-    event.respondWith(networkFirst(req));
-    return;
-  }
-
-  event.respondWith(cacheFirst(req));
-});
-
-// ─── Strategies ────────────────────────────────────────────────
-
-async function networkFirst(req) {
-  try {
-    const resp = await fetch(req);
-    // Only cache a genuine 200 same-origin shell. Caching a 500 deploy blip,
-    // a proxy error page or a redirect here would poison '/' and serve that
-    // as the offline shell forever (matches cacheFirst's guard).
-    if (resp.ok && resp.type === 'basic') {
-      const cache = await caches.open(await readVersion());
-      cache.put('/', resp.clone());
+self.addEventListener('fetch', event => {
+  if (!BUILD || purged || event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  if(url.origin !== self.location.origin || url.search) return;
+  const immutable = /^\/assets\/[\w-]+-[\w-]{8,}\.(?:js|css)$/.test(url.pathname);
+  if(!paths.has(url.pathname) && !immutable) return;
+  // Never fetch a new deployment's module into this immutable generation.
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const own = await cache.match(url.pathname);
+    if(own) return own;
+    // A new active worker can serve an old tab's content-addressed modules
+    // only from an already validated ZapCast generation, never the network.
+    if(immutable) for(const key of await caches.keys()) {
+      if(key.startsWith(`${PREFIX}shell-`)) {
+        const previous = await (await caches.open(key)).match(url.pathname);
+        if(previous) return previous;
+      }
     }
-    return resp;
-  } catch {
-    const cached = await caches.match('/');
-    return cached || Response.error();
-  }
-}
-
-async function cacheFirst(req) {
-  const cached = await caches.match(req);
-  if (cached) return cached;
-  const resp = await fetch(req);
-  if (resp.ok && resp.type === 'basic') {
-    const cache = await caches.open(await readVersion());
-    cache.put(req, resp.clone());
-  }
-  return resp;
-}
-
-// ─── Version ───────────────────────────────────────────────────
-
-/** Resolve the asset ETag exposed by the static middleware. */
-async function readVersion() {
-  try {
-    const head = await fetch('/', { method: 'HEAD', cache: 'no-store' });
-    const tag = (head.headers.get('ETag') || '').replace(/"/g, '');
-    return tag ? 'zapcast-' + tag : FALLBACK_VERSION;
-  } catch {
-    return FALLBACK_VERSION;
-  }
-}
+    return Response.error();
+  })());
+});

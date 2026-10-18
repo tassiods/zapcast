@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // app.js — entry point. Bootstrap order:
 //   1. settings (theme/accent/density toggles, sidebar drawer)
 //   2. i18n (need translations before any rendered string)
@@ -8,14 +9,14 @@
 //   7. router (last so renders are wired before the first hashchange fires)
 
 import { state, set, on } from './state.js';
-import { api, getAuthToken, setAuthToken, clearAuthToken, setUnauthorizedHandler } from './api.js';
+import { api, invalidateSession, clearAuthToken, setUnauthorizedHandler } from './api.js';
 import { $, show, toast, toastErr, showAuthPrompt } from './ui.js';
 // `toast` is also used by the global error handlers below; we keep it in
 // the same import block to make the dependency explicit.
 import { detectBootLang, loadTranslations, switchLanguage, t } from './i18n.js';
 import { initRouter, navigate } from './router.js';
 import { initSettings } from './settings.js';
-import { startSSE } from './sse.js';
+import { startSSE, stopSSE } from './sse.js';
 
 import { initContactsView, loadContacts, rerenderContacts } from './view-contacts.js';
 import { initGroupsView, loadGroups } from './view-groups.js';
@@ -26,6 +27,7 @@ import {
   renderContactPicker,
   updatePreview,
   restoreBroadcastDraft,
+  clearBroadcastPrivate,
   onProgress,
   onDone,
 } from './view-broadcast.js';
@@ -34,9 +36,13 @@ import { initTemplatesView, loadTemplates, setOnChange as setTemplatesOnChange }
 import { initHistoryView, loadHistory, refreshBroadcastStats } from './view-history.js';
 import { initAuthView, setAuthCallbacks } from './view-auth.js';
 
+// Optional release label is compiled into the application as well as the SW.
+document.documentElement.dataset.build = import.meta.env?.VITE_ZAPCAST_BUILD_ID || 'production';
+
 // ─── Status ────────────────────────────────────────────────────
 
 async function checkStatus() {
+  if (sessionLocked) return;
   try {
     const s = await api('/api/status');
     statusLoaded = true;
@@ -97,13 +103,65 @@ function applyStatus(s) {
 
 // ─── Unauthorized ──────────────────────────────────────────────
 
+let nativeAuth = false;
+let sessionLocked = false;
 let promptShown = false;
+const privacyChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('zapcast-session') : null;
+privacyChannel?.addEventListener('message', event => {
+  if(event.data === 'clear') clearPrivatePage(false);
+});
+async function clearPrivatePage(notify = true) {
+  if(sessionLocked) return;
+  if(notify) privacyChannel?.postMessage('clear');
+  sessionLocked = true;
+  invalidateSession();
+  stopSSE();
+  clearAuthToken();
+  clearBroadcastPrivate();
+  window.dispatchEvent(new Event('zapcast:session-cleared'));
+  set({ contacts: [], groups: [], templateVars: {}, nameByPhone: new Map(),
+    status: {connected: false, loggedIn: false}, activeBroadcastId: null });
+  document.querySelector('main').replaceChildren();
+  const panel = document.createElement('div');
+  panel.id = 'sessionLocked';
+  panel.textContent = nativeAuth ? 'Sessão do aplicativo encerrada.' :
+    'Dados locais removidos. Para sair do SSO, encerre também a sessão no provedor de identidade.';
+  document.querySelector('main').append(panel);
+  for(const id of ['authInput','modalMsg','toastContainer','toastErrorContainer']) {
+    const el = $(id);
+    if(el instanceof HTMLInputElement) el.value = '';
+    else el?.replaceChildren();
+  }
+  for(const reg of await (navigator.serviceWorker?.getRegistrations?.() || Promise.resolve([]))) {
+    const workers = [reg.active,reg.waiting,reg.installing].filter(Boolean);
+    if(!workers.some(worker => new URL(worker.scriptURL).pathname === '/sw.js')) continue;
+    await Promise.all(workers.map(worker => new Promise(resolve => {
+      const channel = new MessageChannel();
+      const timeout = setTimeout(() => resolve(undefined), 1500);
+      channel.port1.onmessage = () => {clearTimeout(timeout); resolve(undefined);};
+      worker.postMessage({type:'PURGE'},[channel.port2]);
+    })));
+    await reg.unregister();
+  }
+  if ('caches' in window) {
+    for (const key of await caches.keys()) if (key.startsWith('zapcast-')) await caches.delete(key);
+  }
+}
+async function logoutApp() {
+  await clearPrivatePage();
+  try {
+    const res = await fetch('/api/auth/session/logout', {method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error'});
+    if (!res.ok) throw new Error('logout');
+  } catch { $('sessionLocked').textContent += ' Não foi possível confirmar a revogação no servidor; feche a sessão SSO/navegador.'; }
+}
 // Single auth path: route every 401 through the cookie-based login flow
 // (runLoginFlow), which re-prompts on a wrong token and gives the operator
 // feedback instead of the old clear→prompt→blind-reload loop that gave none.
 async function handleUnauthorized() {
-  if (promptShown) return;
+  if (promptShown || sessionLocked) return;
   promptShown = true;
+  await clearPrivatePage();
+  if (!nativeAuth) { promptShown = false; return; }
   const ok = await runLoginFlow();
   promptShown = false;
   if (ok) {
@@ -165,6 +223,8 @@ function connectSSE() {
 // ─── Boot ──────────────────────────────────────────────────────
 
 async function boot() {
+  clearAuthToken();
+  clearBroadcastPrivate();
   // Wire helpers that depend on UI before any fetch runs.
   setUnauthorizedHandler(handleUnauthorized);
 
@@ -192,6 +252,7 @@ async function boot() {
   });
 
   // Topbar interactions.
+  $('appLogoutBtn').addEventListener('click', logoutApp);
   $('langSelector').addEventListener('change', (e) => switchLanguage(/** @type {HTMLSelectElement} */ (e.target).value));
   $('footerYear').textContent = String(new Date().getFullYear());
 
@@ -205,6 +266,7 @@ async function boot() {
   //    401 means we need to log in.
   try {
     const req = await fetch('/api/auth/required').then((r) => r.json()).catch(() => null);
+    nativeAuth = !!req?.required;
     if (req && req.required) {
       // The cookie set by /api/auth/login is httpOnly so JS can't read
       // it directly — we probe the auth state by hitting a gated route.
@@ -212,23 +274,29 @@ async function boot() {
       if (probe.status === 401) {
         // Hold the guard so a concurrent 401 doesn't open a second prompt.
         promptShown = true;
-        await runLoginFlow();
+        const loggedIn = await runLoginFlow();
         promptShown = false;
+        if (!loggedIn) { await clearPrivatePage(); return; }
       }
     }
   } catch { /* probe is optional */ }
 
   // 3. Single initial status check — SSE owns subsequent changes.
   await checkStatus();
+  if (sessionLocked) return;
+  applyStatus(state.status);
 
   // 4. Data — fire in parallel, render once each settles.
   wireReactivity();
   await Promise.all([loadContacts(), loadGroups(), loadTemplates()]);
+  if (sessionLocked) return;
   refreshBroadcastStats();
   restoreBroadcastDraft();
 
   // 5. SSE for live progress / receipts / disconnects.
   connectSSE();
+  window.addEventListener('focus', checkStatus);
+  setInterval(() => { if (!document.hidden) checkStatus(); }, 30_000);
 
   // 6. Router (will trigger first page render).
   initRouter((page) => {
@@ -252,16 +320,12 @@ async function runLoginFlow() {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'same-origin', cache: 'no-store', redirect: 'error',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token }),
       });
       if (res.ok) {
-        // Also keep the token in sessionStorage as the SSE fallback
-        // for EventSource installs that can't send the cookie
-        // cross-tab. Eventually drop this when the wire fully moves to
-        // cookies.
-        setAuthToken(token);
+        clearAuthToken();
         return true;
       }
       if (res.status === 401) continue;
@@ -298,8 +362,8 @@ function reportClientError(kind, payload) {
   recentErrorKeys.add(key);
   setTimeout(() => recentErrorKeys.delete(key), ERROR_DEDUP_WINDOW_MS);
 
-  console.error('[' + kind + ']', payload);
-  try { toast(payload?.message || kind, 'error'); } catch { /* toast may not be ready */ }
+  console.error('[' + kind + ']', 'Client failure');
+  try { toast('Client failure', 'error'); } catch { /* toast may not be ready */ }
 
   // Best-effort telemetry. Keep payload tiny so a broken endpoint can't
   // tarball user data. `keepalive` lets the request survive a tab close.
@@ -310,12 +374,12 @@ function reportClientError(kind, payload) {
       keepalive: true,
       body: JSON.stringify({
         kind,
-        message: String(payload?.message || '').slice(0, 500),
-        source: String(payload?.source || '').slice(0, 200),
+        message: 'Client failure',
+        source: '',
         line: payload?.line || 0,
         col: payload?.col || 0,
         userAgent: navigator.userAgent.slice(0, 200),
-        href: location.href,
+        href: '/',
       }),
     }).catch(() => {});
   } catch { /* fetch unavailable */ }
@@ -350,9 +414,24 @@ function pokeSWUpdate() {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
-      console.warn('[sw] register failed', err);
-    });
+    if(sessionLocked) return;
+    navigator.serviceWorker.register('/sw.js', {updateViaCache:'none'}).then(reg => {
+      if(sessionLocked) {reg.unregister(); return;}
+      const showUpdate = () => {
+        if(!reg.waiting) return;
+        const button = $('swUpdateBtn');
+        button.hidden = false;
+        button.onclick = () => {
+          // User-controlled activation: never reload a live draft silently.
+          navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload(), {once:true});
+          reg.waiting?.postMessage({type:'ACTIVATE'});
+        };
+      };
+      showUpdate();
+      reg.addEventListener('updatefound', () => {
+        reg.installing?.addEventListener('statechange', showUpdate);
+      });
+    }).catch(() => {});
     pokeSWUpdate();
   });
   // Long-lived SPA tabs never navigate, so without a nudge a stale shell

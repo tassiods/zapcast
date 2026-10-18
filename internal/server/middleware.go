@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -13,8 +13,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,7 +38,10 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-Id", rid)
 		ctx := context.WithValue(r.Context(), requestIDKey, rid)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		request := r.WithContext(ctx)
+		next.ServeHTTP(w, request)
+		// Preserve the registered mux label for outer access/metric middleware.
+		r.Pattern = request.Pattern
 	})
 }
 
@@ -56,15 +61,18 @@ func (app *App) corsMiddleware(next http.Handler) http.Handler {
 		switch {
 		case app.allowedOrigin != "":
 			// Strict mode: only the configured origin is allowed.
-			if origin != "" && origin != app.allowedOrigin {
+			if origin != "" && !originsEqual(origin, app.allowedOrigin) {
 				http.Error(w, "origin not allowed", http.StatusForbidden)
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", app.allowedOrigin)
+			if origin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			}
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Vary", "Origin")
-		case app.authToken != "":
-			// AUTH_TOKEN is set but FRONTEND_ORIGIN isn't. Reflect the
+		case app.authToken != "" || app.authMode == "proxy":
+			// Native/proxy auth is enabled without FRONTEND_ORIGIN. Reflect the
 			// caller's origin when it matches the listener (same-origin
 			// SPA), otherwise reject. We deliberately *don't* fall back to
 			// `*` here — a wildcard with a bearer-token API surface widens
@@ -116,11 +124,7 @@ func isSameOriginRequest(r *http.Request, origin string) bool {
 	if r.Host == "" {
 		return false
 	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	originHost := normalisedHost(u.Scheme, u.Host)
+	originScheme, originHost := originTuple(origin)
 	if originHost == "" {
 		return false
 	}
@@ -132,24 +136,63 @@ func isSameOriginRequest(r *http.Request, origin string) bool {
 	if isSecureRequest(r) {
 		reqScheme = "https"
 	}
-	reqHost := normalisedHost(reqScheme, r.Host)
-	return originHost == reqHost
+	host := r.Host
+	if peerIsTrusted(remoteHost(r)) {
+		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+			if proto != "http" && proto != "https" {
+				return false
+			}
+			reqScheme = proto
+		}
+		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+			host = forwardedHost
+		}
+	}
+	reqHost := normalisedHost(reqScheme, host)
+	return originScheme == reqScheme && originHost == reqHost
+}
+
+func originTuple(origin string) (string, string) {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.HasSuffix(origin, "#") {
+		return "", ""
+	}
+	host := normalisedHost(u.Scheme, u.Host)
+	if host == "" {
+		return "", ""
+	}
+	return u.Scheme, host
+}
+
+func originsEqual(a, b string) bool {
+	as, ah := originTuple(a)
+	bs, bh := originTuple(b)
+	return ah != "" && as == bs && ah == bh
 }
 
 // normalisedHost returns host:port, substituting the scheme's default port
 // when omitted. Returns "" for unknown schemes.
 func normalisedHost(scheme, host string) string {
-	if !strings.Contains(host, ":") {
-		switch scheme {
-		case "http":
-			return host + ":80"
-		case "https":
-			return host + ":443"
-		default:
-			return ""
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	u, err := url.Parse(scheme + "://" + host)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.HasSuffix(host, "#") || strings.ContainsAny(host, ", 	\r\n") || strings.HasSuffix(host, ":") {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
 		}
 	}
-	return host
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return ""
+	}
+	return net.JoinHostPort(strings.ToLower(u.Hostname()), strconv.Itoa(n))
 }
 
 // authMiddleware enforces a bearer token on /api/* when AUTH_TOKEN is set.
@@ -176,19 +219,13 @@ func (app *App) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Three accepted credentials, in order of preference:
-		//   1. The httpOnly session cookie (preferred for browser SPAs).
-		//   2. `Authorization: Bearer <token>` (CLI / integration callers).
-		//   3. `?token=` query string (EventSource fallback; deprecated).
+		// Cookies for browsers; explicit Bearer headers for integrations.
 		if c, err := r.Cookie(sessionCookieName); err == nil && app.validSessionCookie(c.Value) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if got == "" {
-			got = r.URL.Query().Get("token")
-		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(app.authToken)) != 1 {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(app.authToken)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="zapcast"`)
 			jsonError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return

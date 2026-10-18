@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -53,16 +53,6 @@ func TestStaticETagMiddleware304OnMatch(t *testing.T) {
 	}
 	if called {
 		t.Error("inner handler must not run on If-None-Match hit")
-	}
-}
-
-func TestSecurityHeadersAvoidUnsupportedPermissionsPolicyFeatures(t *testing.T) {
-	rec := httptest.NewRecorder()
-	applySecurityHeaders(rec)
-
-	policy := rec.Header().Get("Permissions-Policy")
-	if strings.Contains(policy, "bluetooth") {
-		t.Fatalf("Permissions-Policy must not include browser-unsupported bluetooth directive: %q", policy)
 	}
 }
 

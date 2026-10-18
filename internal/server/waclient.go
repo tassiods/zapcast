@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -63,3 +63,13 @@ func (w *whatsmeowWA) AddEventHandler(fn func(evt any)) uint32 {
 }
 
 func (w *whatsmeowWA) JID() *types.JID { return w.c.Store.ID }
+
+// Optional capability preserves small third-party/test WAClient implementations.
+// A stable ID assists receipt correlation; it is NOT an exactly-once guarantee.
+type stableWAClient interface {
+	SendMessageWithID(context.Context, types.JID, *waProto.Message, string) (whatsmeow.SendResponse, error)
+}
+
+func (w *whatsmeowWA) SendMessageWithID(ctx context.Context, to types.JID, msg *waProto.Message, id string) (whatsmeow.SendResponse, error) {
+	return w.c.SendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
+}

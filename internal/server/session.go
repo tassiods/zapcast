@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -39,8 +40,8 @@ type LoginResponse struct {
 }
 
 // handleLogin trades a bearer token for an httpOnly cookie. The cookie
-// is bound to the listener's origin (Secure + SameSite=Strict) so a
-// stolen cookie can't be reused cross-site or over plain HTTP.
+// uses HttpOnly, SameSite=Strict and Secure on trusted HTTPS requests.
+// Copies are bearer credentials; the durable allowlist makes logout revocable.
 //
 // We reject anything but the configured AUTH_TOKEN (or anything when
 // AUTH_TOKEN is empty — there's nothing to authenticate without one).
@@ -59,6 +60,10 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value := app.issueSession()
+	if value == "" {
+		jsonError(w, http.StatusServiceUnavailable, "session_unavailable", "session store unavailable")
+		return
+	}
 	// #nosec G124 -- HttpOnly/SameSite=Strict are set; Secure is gated by
 	// isSecureRequest so local-HTTP dev still works. Production runs
 	// behind TLS (req.TLS != nil) or a proxy setting X-Forwarded-Proto.
@@ -74,9 +79,15 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, LoginResponse{Status: "ok"})
 }
 
-// handleSessionLogout clears the session cookie. Idempotent; succeeds
-// even when no cookie is present.
+// handleSessionLogout durably revokes the cookie identity, then clears it.
+// Idempotent when absent; persistence errors return 503 instead of false success.
 func (app *App) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookieName); err == nil {
+		if err := app.revokeSession(c.Value); err != nil {
+			jsonError(w, http.StatusServiceUnavailable, "session_unavailable", "session revocation unavailable")
+			return
+		}
+	}
 	// #nosec G124 -- mirrors handleLogin; clearing a cookie that was set
 	// with the same attributes the client originally received.
 	http.SetCookie(w, &http.Cookie{
@@ -101,15 +112,26 @@ func (app *App) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 // real, enforced TTL instead of the old constant HMAC(token) that never
 // expired and never changed.
 func (app *App) issueSession() string {
+	if app.authToken == "" || len(app.sessionKey()) != 32 {
+		return ""
+	}
 	nonce := make([]byte, 16)
-	_, _ = rand.Read(nonce)
+	if _, err := rand.Read(nonce); err != nil {
+		return ""
+	}
 	payload := hex.EncodeToString(nonce) + "." + strconv.FormatInt(time.Now().Unix(), 10)
-	return payload + "." + app.sessionMACFor(payload)
+	value := payload + "." + app.sessionMACFor(payload)
+	if !app.registerSession(value) {
+		return ""
+	}
+	return value
 }
 
 // sessionMACFor returns the hex HMAC of payload under the session key.
 func (app *App) sessionMACFor(payload string) string {
 	mac := hmac.New(sha256.New, app.sessionKey())
+	mac.Write([]byte(app.authToken))
+	mac.Write([]byte{0})
 	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -126,22 +148,44 @@ func (app *App) sessionKey() []byte {
 }
 
 // loadOrCreateSessionKey reads dir/session.key, generating + persisting a
-// fresh 32-byte key when missing. Persist failures degrade gracefully to
-// the per-process behaviour (sessions die on restart) with a warning.
+// fresh 32-byte key when missing. Read, entropy, or persistence errors return
+// nil: native login/startup fail closed instead of silently replacing keys.
 func loadOrCreateSessionKey(lg *slog.Logger, dir string) []byte {
 	fresh := make([]byte, 32)
-	_, _ = rand.Read(fresh)
+	if _, err := rand.Read(fresh); err != nil {
+		return nil
+	}
 	if dir == "" {
 		return fresh
 	}
 	path := filepath.Join(dir, "session.key")
 	// #nosec G304 -- path derives from STORE_DIR, set by the operator.
-	if b, err := os.ReadFile(path); err == nil && len(b) == 32 {
+	if b, err := os.ReadFile(path); err == nil {
+		if len(b) != 32 {
+			return nil
+		}
 		return b
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	if err := os.WriteFile(path, fresh, 0o600); err != nil && lg != nil {
-		lg.Warn("failed to persist session key — sessions won't survive restarts",
-			"err", err, "path", path)
+	// #nosec G304 -- operator-selected STORE_DIR, never a request-supplied path.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return nil
+	}
+	if _, err = f.Write(fresh); err != nil {
+		_ = f.Close()
+		return nil
+	}
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return nil
+	}
+	if err = f.Close(); err != nil {
+		return nil
+	}
+	if lg != nil {
+		lg.Debug("created session key")
 	}
 	return fresh
 }
@@ -150,7 +194,7 @@ func loadOrCreateSessionKey(lg *slog.Logger, dir string) []byte {
 // and unexpired session cookie. Signature check is constant-time; expiry is
 // enforced server-side against sessionTTL from the embedded issue time.
 func (app *App) validSessionCookie(value string) bool {
-	if value == "" || app.authToken == "" {
+	if value == "" || app.authToken == "" || len(app.sessionKey()) != 32 || !app.sessionActive(value) {
 		return false
 	}
 	// Split off the trailing MAC segment; the rest is the signed payload.
@@ -172,15 +216,16 @@ func (app *App) validSessionCookie(value string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Since(time.Unix(issued, 0)) < sessionTTL
+	age := time.Since(time.Unix(issued, 0))
+	return age >= 0 && age < sessionTTL && app.sessionActive(value)
 }
 
 // isSecureRequest mirrors net/http's heuristic. TLS terminated inside
 // our process counts; behind a reverse proxy the proxy must set
-// X-Forwarded-Proto: https.
+// X-Forwarded-Proto: https and be an immediate peer configured in TRUST_PROXY.
 func isSecureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return r.Header.Get("X-Forwarded-Proto") == "https"
+	return peerIsTrusted(remoteHost(r)) && r.Header.Get("X-Forwarded-Proto") == "https"
 }

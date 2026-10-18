@@ -103,55 +103,17 @@ function expandRecipientBadges(btn) {
   btn.remove();
 }
 
-// ─── Draft autosave (F5 no longer eats the message) ───────────
-
-/** localStorage key — bump the suffix if the draft shape ever changes. */
-const DRAFT_KEY = 'zapcast.draft.v1';
-
-let draftTimer = null;
-
-function queueSaveDraft() {
-  clearTimeout(draftTimer);
-  draftTimer = setTimeout(saveDraft, 400);
-}
-
-function saveDraft() {
-  try {
-    const draft = {
-      message: /** @type {HTMLTextAreaElement} */ ($('broadcastMsg')).value,
-      mode: state.broadcastMode,
-      groupId: /** @type {HTMLSelectElement} */ ($('broadcastGroup')).value,
-    };
-    if (!draft.message && !draft.groupId) {
-      localStorage.removeItem(DRAFT_KEY);
-      return;
-    }
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-  } catch { /* private mode / quota — draft is best-effort */ }
-}
-
+// Drafts deliberately remain only in the live page. No automatic persistence:
+// proxy/SSO mode supplies no native operator identity to scope saved text.
+function queueSaveDraft() {} // Switching views keeps the existing textarea.
 function clearDraft() {
-  clearTimeout(draftTimer);
-  try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+  try { localStorage.removeItem('zapcast.draft.v1'); } catch { /* denied storage */ }
 }
-
-/**
- * Restore a previous draft after contacts/groups have loaded (options must
- * exist before we can reselect the group). Called once from boot.
- */
-export function restoreBroadcastDraft() {
-  let draft = null;
-  try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); } catch { /* corrupt — ignore */ }
-  if (!draft || (!draft.message && !draft.groupId)) return;
-  if (draft.message) /** @type {HTMLTextAreaElement} */ ($('broadcastMsg')).value = draft.message;
-  if (draft.mode === 'contacts' || draft.mode === 'group') setMode(draft.mode);
-  if (draft.groupId) {
-    /** @type {HTMLSelectElement} */ ($('broadcastGroup')).value = draft.groupId;
-    renderGroupOptions();
-  }
-  updatePreview();
-  updateCharCount();
-  if (draft.message) toast('msg_draft_restored', 'info');
+export function restoreBroadcastDraft() { clearDraft(); }
+export function clearBroadcastPrivate() {
+  clearDraft();
+  if (attachment?.previewURL) URL.revokeObjectURL(attachment.previewURL);
+  attachment = null;
 }
 
 /**

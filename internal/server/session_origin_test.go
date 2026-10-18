@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -75,6 +75,9 @@ func TestIsSameOriginRequestSchemeMismatch(t *testing.T) {
 }
 
 func TestIsSameOriginRequestBehindTLSProxy(t *testing.T) {
+	old := trustedProxies
+	defer func() { trustedProxies = old }()
+	trustedProxies = parseTrustedProxies(testLogger, "192.0.2.1")
 	r := httptest.NewRequest("GET", "http://example.com/api/status", nil)
 	r.Host = "example.com"
 	r.Header.Set("X-Forwarded-Proto", "https")

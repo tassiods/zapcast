@@ -1,95 +1,84 @@
-# AGENTS.md
+# ZapCast contributor and agent guidance
 
-Guidance for AI coding agents and maintainers working in this repository.
+## Scope and safety
 
-## Purpose
+ZapCast is a self-hosted Go/Whatsmeow/SQLite service with an embedded SPA/PWA.
+The separate ZapCast Chrome extension is standalone: do not assume API integration
+or shared storage. Read `README.md`, `docs/production.md` and this file first.
 
-ZapCast is a self-hosted WhatsApp bulk-messaging web app. It has a Go backend, SQLite persistence, an embedded SPA and a `whatsmeow` WhatsApp Multi-Device client.
+Do not use real contacts, credentials, paired stores or WhatsApp sends in tests.
+Use fake adapters and disposable synthetic SQLite stores. Real pairing/sends,
+production changes, migrations of real data, deployment, restarts and publication
+require explicit current authorization. Cancellation cannot retract an accepted
+message; a connection is not delivery proof. Never claim exactly-once delivery.
 
-## Stack
+Preserve pending diffs. Never reset another checkout or rewrite public history.
+`store/`, `.env`, session keys, backups and real message/contact data are private;
+never read them for ordinary code work or include them in evidence/publication.
 
-- Go 1.26 (`go.mod`)
-- `go.mau.fi/whatsmeow` for WhatsApp connectivity
-- `github.com/mattn/go-sqlite3` for SQLite (cgo required)
-- `log/slog` for structured logging
-- Plain HTML/CSS/JS under `internal/server/web/`
-- Vite/Vitest/TypeScript/Playwright for frontend build and tests
+## Stack and build
 
-## Run
+- Go 1.26.9, `GOTOOLCHAIN=local`, CGO and a C compiler for `go-sqlite3`.
+- Node 22.23.3, npm 12.2.0; strict `npm ci`, exact versions and lockfile.
+- Plain HTML/CSS/JS under `internal/server/web/`; Vite/Vitest/TypeScript/Playwright.
+- Development embeds the source tree. Production runs `npm run build`, then
+  `python3 scripts/build.py ci` (or an explicitly reviewed release version).
+- `release-artifacts/` must be empty before building. Production output is
+  linux/amd64 with `-tags prod`, an injected version and provenance/checksums.
+- Node is not required in the deployed application runtime.
 
-```bash
-go mod download
-go run .
-```
+## Architecture and contracts
 
-Defaults: `http://127.0.0.1:3000`, runtime state in `./store/`.
+- `main.go`: server entrypoint and bounded `healthcheck` CLI.
+- `server.go`: App, boot, route registration and ordered shutdown.
+- `contacts.go`, `delivery.go`, `outbox.go`, `migrations/`: persistence/delivery.
+- `auth_config.go`, `session.go`, `session_store.go`, `stream_auth.go`: auth.
+- `sse.go` + `sse_events.go`: nonblocking fan-out and typed payloads.
+- `web/`: SPA, private-session lifecycle, immutable production PWA generations.
 
-Docker:
+Persist the full recipient/body/media intent transactionally before provider
+operations. Treat transport/ACK/timeouts and uncertain commits as ambiguous, not
+proven rejection. Keep pending, inflight, uncertain, cancelled and confirmed states
+distinct. Stable message IDs aid correlation, not an exactly-once guarantee.
+Retries share durable cadence/quota admission. Review ambiguous legacy work through
+`GET /api/delivery/review` and `POST /api/delivery/{id}/resolve`; retry requires an
+explicit duplicate-risk acknowledgment. Do not recreate it as a new broadcast.
 
-```bash
-docker compose up -d
-docker compose logs -f
-```
+Native browser auth uses HttpOnly cookies, revocable sessions and no master-token
+browser storage or query tokens. `AUTH_MODE` is `native`, `proxy` or loopback-only
+`local`. Proxy mode requires an independently protected SSO/network boundary;
+`TRUST_PROXY` accepts actual immediate-peer IPs/CIDRs, never a boolean.
 
-## Build modes
+New schema changes require new numbered migrations; never edit released migrations
+in place. Keep database transitions in ContactStore methods. Use contextual calls,
+structured `slog`, localized structured API errors and escaped/whitelisted UI text.
+`Broadcaster.Start` returns a handle: exactly one Done/Abandon path must execute.
+SSE is best effort, never a durable delivery authority.
 
-- Dev/default: `go run .` or `go build .` embeds `internal/server/web/`.
-- Prod: run `npm run build`, then `go build -tags prod`; this embeds `internal/server/web/dist/`.
-- Release binaries inject `versionLdflag` via ldflags.
+## Verification and publication boundary
 
-## Environment
+Run in an isolated checkout, with temporary files under the approved `TMPDIR`:
 
-- `HOST` default `127.0.0.1`
-- `PORT` default `3000`
-- `STORE_DIR` default `store`
-- `LOG_LEVEL` default `info`
-- `LOG_FORMAT` default `text`
-- `AUTH_TOKEN` enables native auth for `/api/*` and `/debug/vars`
-- `FRONTEND_ORIGIN` pins allowed browser origin
-- `BROADCAST_DELAY_MS`, `BROADCAST_DELAY_JITTER`, `BROADCAST_HOURLY_CAP` tune pacing
-
-## Test
-
-```bash
-gofmt -s -w .
+```sh
+go mod verify
 go vet ./...
-go test ./...
-go test -race -coverprofile=coverage.out ./...
-
-npm ci
-npm test
+go test -race -coverprofile=coverage.out -covermode=atomic ./...
+npm run test:delivery
 npm run test:types
+npm test
 npm run build
-npm run test:e2e
+python3 scripts/build.py ci
+ZAPCAST_E2E_BINARY="$PWD/release-artifacts/zapcast-linux-amd64" npm run test:e2e
+python3 scripts/release.py --dry-run --version ci --artifacts release-artifacts
 ```
 
-`e2e/` contains Playwright browser smoke tests.
+The canonical browser runner exercises synthetic browser contracts and the exact
+production binary on fresh loopback ports/stores. Never reuse a real session.
+Keep fixture results distinct from native-binary and provider acceptance.
+CI also runs pinned lint/security/vulnerability scans and a 65% coverage floor.
+Release requires same-SHA gates and consumes the tested artifact without rebuilding.
+A dirty local artifact is a validation candidate, not an approved release.
+Container/production/provider acceptance and publication need separate approval.
 
-## Architecture notes
-
-- `main.go` only calls `server.Run()`.
-- Server code lives under `internal/server/`.
-- `server.go` owns `App`, startup, routes and shutdown.
-- `contacts.go` owns persistence APIs; avoid raw SQL in handlers and WhatsApp callbacks.
-- Migrations live under `internal/server/migrations/`; add new files, do not edit released migrations in place.
-- `broadcast.go`, `broadcaster.go` and `outbox.go` own delivery lifecycle/retries.
-- `sse.go` + `sse_events.go` own non-blocking SSE fan-out and typed payloads.
-- `auth.go` + `session.go` own QR/status/logout and browser session exchange.
-- `internal/server/web/` is the SPA source.
-
-## Conventions
-
-- Keep API docs in `README.md` and error-code docs in `SECURITY.md` in sync with routes/errors.
-- Translatable errors implement `LocalizedError` and are surfaced through `handleError` or `jsonErrorLocalized`.
-- Logs use injected `*slog.Logger` values and structured key/value pairs.
-- `SSEHub.Broadcast` is intentionally non-blocking; drops are counted.
-- `Broadcaster.Start` returns a `StartHandle`; exactly one of `Done()` or `Abandon()` must run.
-- Phone validation is strict E.164-style digits: 7–15 digits, no leading `0`.
-- Auth accepts an HttpOnly browser session cookie first, then `Authorization: Bearer ...`; query-string token support exists only as a deprecated fallback.
-
-## Gotchas
-
-- `store/` contains WhatsApp session secrets and app data. It is gitignored and must not be committed.
-- cgo is required for SQLite.
-- Production web bytes are generated; if `-tags prod` fails, run `npm run build` first.
-- Shutdown ordering matters: close broadcast admission, cancel active broadcast, wait for broadcast/outbox, shut down HTTP, disconnect WhatsApp, close DB.
+See `docs/consolidation.md` for source selection and deliberately deferred changes.
+This file is authoritative over historical `.CLAUDE.md` guidance.

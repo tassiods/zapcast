@@ -9,5 +9,6 @@ zapcast-go-tmp-umask
 *.db-shm
 .env*
 *.local
+.claude/
 *.key
 *.pem

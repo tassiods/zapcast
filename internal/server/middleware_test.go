@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 ZapCast contributors
+// SPDX-FileCopyrightText: 2025 Tássio Dias <https://github.com/tassiods/zapcast>
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -156,13 +156,13 @@ func TestAuthAcceptsBearer(t *testing.T) {
 	}
 }
 
-func TestAuthAcceptsQueryToken(t *testing.T) {
+func TestAuthRejectsQueryToken(t *testing.T) {
 	app := &App{authToken: "secret"}
 	h := app.authMiddleware(passHandler)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/events?token=secret", nil))
-	if rec.Code != 200 {
-		t.Errorf("expected 200 via query token, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for query token, got %d", rec.Code)
 	}
 }
 

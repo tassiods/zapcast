@@ -208,6 +208,7 @@ export function showAuthPrompt() {
       if (done) return;
       done = true;
       backdrop.classList.remove('open');
+      input.value = '';
       submit.removeEventListener('click', onSubmit);
       document.removeEventListener('keydown', onKey, true);
       try { /** @type {HTMLElement|null} */ (previousFocus)?.focus?.(); } catch { /* lost target */ }
@@ -328,7 +329,7 @@ export function humanSize(bytes) {
 }
 
 /**
- * Accent- and case-insensitive fold for search. "Jose" matches "José",
+ * Accent- and case-insensitive fold for search. "Tassio" matches "Tássio",
  * "AVENIDA" matches "avenida". Null-safe — null/undefined fold to ''.
  *
  * @param {*} s
